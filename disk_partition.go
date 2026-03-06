@@ -22,22 +22,22 @@ var (
 	errInvalidPartition = errors.New("invalid partition")
 )
 
-// A disk partition implements a partition that uses local disk as a storage.
-// It mainly has two files, data file and meta file.
-// The data file is memory-mapped and read only; no need to lock at all.
+// diskPartition 实现了一个使用本地磁盘作为存储的分区。
+	// 它主要有两个文件：数据文件和元数据文件。
+	// 数据文件是内存映射的且只读的；完全不需要加锁。
 type diskPartition struct {
 	dirPath string
 	meta    meta
-	// file descriptor of data file
+	// 数据文件的文件描述符
 	f *os.File
-	// memory-mapped file backed by f
+	// 由 f 支持的内存映射文件
 	mappedFile []byte
-	// duration to store data
+	// 存储数据的持续时间
 	retention time.Duration
 }
 
-// meta is a mapper for a meta file, which is put for each partition.
-// Note that the CreatedAt is surely timestamped by tstorage but Min/Max Timestamps are likely to do by other process.
+// meta 是元数据文件的映射器，为每个分区放置一个。
+	// 注意，CreatedAt 肯定是由 tstorage 加时间戳的，但 Min/Max 时间戳很可能由其他进程完成。
 type meta struct {
 	MinTimestamp  int64                 `json:"minTimestamp"`
 	MaxTimestamp  int64                 `json:"maxTimestamp"`
@@ -46,7 +46,7 @@ type meta struct {
 	CreatedAt     time.Time             `json:"createdAt"`
 }
 
-// diskMetric holds meta data to access actual data from the memory-mapped file.
+// diskMetric 保存用于从内存映射文件访问实际数据的元数据。
 type diskMetric struct {
 	Name          string `json:"name"`
 	Offset        int64  `json:"offset"`
@@ -55,7 +55,7 @@ type diskMetric struct {
 	NumDataPoints int64  `json:"numDataPoints"`
 }
 
-// openDiskPartition first maps the data file into memory with memory-mapping.
+// openDiskPartition 首先使用内存映射将数据文件映射到内存中。
 func openDiskPartition(dirPath string, retention time.Duration) (partition, error) {
 	if dirPath == "" {
 		return nil, fmt.Errorf("dir path is required")
@@ -66,7 +66,7 @@ func openDiskPartition(dirPath string, retention time.Duration) (partition, erro
 		return nil, errInvalidPartition
 	}
 
-	// Map data to the memory
+	// 将数据映射到内存
 	dataPath := filepath.Join(dirPath, dataFileName)
 	f, err := os.Open(dataPath)
 	if err != nil {
@@ -85,7 +85,7 @@ func openDiskPartition(dirPath string, retention time.Duration) (partition, erro
 		return nil, fmt.Errorf("failed to perform mmap: %w", err)
 	}
 
-	// Read metadata to the heap
+	// 将元数据读取到堆中
 	m := meta{}
 	mf, err := os.Open(metaFilePath)
 	if err != nil {
@@ -127,7 +127,7 @@ func (d *diskPartition) selectDataPoints(metric string, labels []Label, start, e
 		return nil, fmt.Errorf("failed to generate decoder for metric %q in %q: %w", name, d.dirPath, err)
 	}
 
-	// TODO: Divide fixed-lengh chunks when flushing, and index it.
+	// TODO: 刷新时将固定长度的块分开，并对其进行索引。
 	points := make([]*DataPoint, 0, mt.NumDataPoints)
 	for i := 0; i < int(mt.NumDataPoints); i++ {
 		point := &DataPoint{}
@@ -157,7 +157,7 @@ func (d *diskPartition) size() int {
 	return d.meta.NumDataPoints
 }
 
-// Disk partition is immutable.
+// 磁盘分区是不可变的。
 func (d *diskPartition) active() bool {
 	return false
 }

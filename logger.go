@@ -1,8 +1,8 @@
 package tstorage
 
-// TODO: Think about another abstraction way
+// TODO: 考虑另一种抽象方式
 
-// Logger is a logging interface
+// Logger 是一个日志记录接口
 type Logger interface {
 	Printf(format string, v ...interface{})
 }
@@ -10,6 +10,6 @@ type Logger interface {
 type nopLogger struct{}
 
 func (l *nopLogger) Printf(_ string, _ ...interface{}) {
-	// Do nothing
+	// 什么都不做
 	return
 }

@@ -7,25 +7,25 @@ import (
 )
 
 const (
-	// The maximum length of label name.
+	// 标签名称的最大长度。
 	//
-	// Longer names are truncated.
+	// 更长的名称会被截断。
 	maxLabelNameLen = 256
 
-	// The maximum length of label value.
+	// 标签值的最大长度。
 	//
-	// Longer values are truncated.
+	// 更长的值会被截断。
 	maxLabelValueLen = 16 * 1024
 )
 
-// Label is a time-series label.
-// A label with missing name or value is invalid.
+// Label 是一个时序标签。
+	// 缺少名称或值的标签是无效的。
 type Label struct {
 	Name  string
 	Value string
 }
 
-// marshalMetricName builds a unique bytes by encoding labels.
+// marshalMetricName 通过编码标签来构建唯一的字节。
 func marshalMetricName(metric string, labels []Label) string {
 	if len(labels) == 0 {
 		return metric
@@ -34,7 +34,7 @@ func marshalMetricName(metric string, labels []Label) string {
 		return name == "" || value == ""
 	}
 
-	// Determine the bytes size in advance.
+	// 预先确定字节大小。
 	size := len(metric) + 2
 	sort.Slice(labels, func(i, j int) bool {
 		return labels[i].Name < labels[j].Name
@@ -55,7 +55,7 @@ func marshalMetricName(metric string, labels []Label) string {
 		size += 4
 	}
 
-	// Start building the bytes.
+	// 开始构建字节。
 	out := make([]byte, 0, size)
 	out = encoding.MarshalUint16(out, uint16(len(metric)))
 	out = append(out, metric...)

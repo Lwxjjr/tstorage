@@ -8,7 +8,7 @@ import (
 type walOperation byte
 
 const (
-	// The record format for operateInsert is as shown below:
+	// operateInsert 的记录格式如下所示：
 	/*
 	   +--------+---------------------+--------+--------------------+----------------+
 	   | op(1b) | len metric(varints) | metric | timestamp(varints) | value(varints) |
@@ -17,7 +17,7 @@ const (
 	operationInsert walOperation = iota
 )
 
-// wal represents a write-ahead log, which offers durability guarantees.
+// wal 表示预写日志，提供持久性保证。
 type wal interface {
 	append(op walOperation, rows []Row) error
 	flush() error

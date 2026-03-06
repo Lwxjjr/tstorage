@@ -20,15 +20,14 @@ import (
 var (
 	ErrNoDataPoints = errors.New("no data points found")
 
-	// Limit the concurrency for data ingestion to GOMAXPROCS, since this operation
-	// is CPU bound, so there is no sense in running more than GOMAXPROCS concurrent
-	// goroutines on data ingestion path.
+	// 将数据摄取的并发限制为 GOMAXPROCS，因为此操作是 CPU 密集型的，
+	// 所以在数据摄取路径上运行超过 GOMAXPROCS 的并发 goroutine 没有意义。
 	defaultWorkersLimit = cgroup.AvailableCPUs()
 
 	partitionDirRegex = regexp.MustCompile(`^p-.+`)
 )
 
-// TimestampPrecision represents precision of timestamps. See WithTimestampPrecision
+// TimestampPrecision 表示时间戳的精度。参见 WithTimestampPrecision
 type TimestampPrecision string
 
 const (
@@ -49,127 +48,125 @@ const (
 	walDirName = "wal"
 )
 
-// Storage provides goroutine safe capabilities of insertion into and retrieval from the time-series storage.
+// Storage 提供了向时序存储插入和检索数据的 goroutine 安全功能。
 type Storage interface {
 	Reader
-	// InsertRows ingests the given rows to the time-series storage.
-	// If the timestamp is empty, it uses the machine's local timestamp in UTC.
-	// The precision of timestamps is nanoseconds by default. It can be changed using WithTimestampPrecision.
+	// InsertRows 将给定的行摄取到时序存储中。
+	// 如果时间戳为空，则使用机器的 UTC 本地时间戳。
+	// 时间戳的精度默认为纳秒。可以使用 WithTimestampPrecision 更改。
 	InsertRows(rows []Row) error
-	// Close gracefully shutdowns by flushing any unwritten data to the underlying disk partition.
+	// Close 通过将任何未写入的数据刷新到底层磁盘分区来优雅地关闭。
 	Close() error
 }
 
-// Reader provides reading access to time series data.
+// Reader 提供对时序数据的读取访问。
 type Reader interface {
-	// Select gives back a list of data points that matches a set of the given metric and
-	// labels within the given start-end range. Keep in mind that start is inclusive, end is exclusive,
-	// and both must be Unix timestamp. ErrNoDataPoints will be returned if no data points found.
+	// Select 返回在给定的 start-end 范围内匹配给定指标和标签的一组数据点。
+	// 请注意，start 是包含的，end 是排除的，两者都必须是 Unix 时间戳。
+	// 如果没有找到数据点，将返回 ErrNoDataPoints。
 	Select(metric string, labels []Label, start, end int64) (points []*DataPoint, err error)
 }
 
-// Row includes a data point along with properties to identify a kind of metrics.
+// Row 包含一个数据点以及用于标识一种指标的属性。
 type Row struct {
-	// The unique name of metric.
-	// This field must be set.
+	// 指标的唯一名称。
+	// 必须设置此字段。
 	Metric string
-	// An optional key-value properties to further detailed identification.
+	// 用于进一步详细标识的可选键值属性。
 	Labels []Label
-	// This field must be set.
+	// 必须设置此字段。
 	DataPoint
 }
 
-// DataPoint represents a data point, the smallest unit of time series data.
+// DataPoint 表示一个数据点，是时序数据的最小单位。
 type DataPoint struct {
-	// The actual value. This field must be set.
+	// 实际值。必须设置此字段。
 	Value float64
-	// Unix timestamp.
+	// Unix 时间戳。
 	Timestamp int64
 }
 
-// Option is an optional setting for NewStorage.
+// Option 是 NewStorage 的可选设置。
 type Option func(*storage)
 
-// WithDataPath specifies the path to directory that stores time-series data.
-// Use this to make time-series data persistent on disk.
+// WithDataPath 指定存储时序数据的目录路径。
+// 使用此选项使时序数据在磁盘上持久化。
 //
-// Defaults to empty string which means no data will get persisted.
+// 默认为空字符串，意味着不会持久化任何数据。
 func WithDataPath(dataPath string) Option {
 	return func(s *storage) {
 		s.dataPath = dataPath
 	}
 }
 
-// WithPartitionDuration specifies the timestamp range of partitions.
-// Once it exceeds the given time range, the new partition gets inserted.
+// WithPartitionDuration 指定分区的时间戳范围。
+// 一旦超过给定的时间范围，就会插入新的分区。
 //
-// A partition is a chunk of time-series data with the timestamp range.
-// It acts as a fully independent database containing all data
-// points for its time range.
+// 分区是带有时间戳范围的时序数据块。
+// 它作为一个完全独立的数据库，包含其时间范围内的所有数据点。
 //
-// Defaults to 1h
+// 默认为 1 小时
 func WithPartitionDuration(duration time.Duration) Option {
 	return func(s *storage) {
 		s.partitionDuration = duration
 	}
 }
 
-// WithRetention specifies when to remove old data.
-// Data points will get automatically removed from the disk after a
-// specified period of time after a disk partition was created.
-// Defaults to 14d.
+// WithRetention 指定何时删除旧数据。
+// 数据点将在磁盘分区创建后的指定时间后自动从磁盘上删除。
+// 默认为 14 天。
 func WithRetention(retention time.Duration) Option {
 	return func(s *storage) {
 		s.retention = retention
 	}
 }
 
-// WithTimestampPrecision specifies the precision of timestamps to be used by all operations.
+// WithTimestampPrecision 指定所有操作使用的时间戳精度。
 //
-// Defaults to Nanoseconds
+// 默认为纳秒
 func WithTimestampPrecision(precision TimestampPrecision) Option {
 	return func(s *storage) {
 		s.timestampPrecision = precision
 	}
 }
 
-// WithWriteTimeout specifies the timeout to wait when workers are busy.
+// WithWriteTimeout 指定 worker 忙碌时等待的超时时间。
 //
-// The storage limits the number of concurrent goroutines to prevent from out of memory
-// errors and CPU trashing even if too many goroutines attempt to write.
+// 存储限制并发 goroutine 的数量，以防止内存溢出错误和 CPU 争用，
+// 即使有太多 goroutine 尝试写入也是如此。
 //
-// Defaults to 30s.
+// 默认为 30 秒。
 func WithWriteTimeout(timeout time.Duration) Option {
 	return func(s *storage) {
 		s.writeTimeout = timeout
 	}
 }
 
-// WithLogger specifies the logger to emit verbose output.
+// WithLogger 指定用于输出详细日志的记录器。
 //
-// Defaults to a logger implementation that does nothing.
+// 默认为不执行任何操作的记录器实现。
 func WithLogger(logger Logger) Option {
 	return func(s *storage) {
 		s.logger = logger
 	}
 }
 
-// WithWAL specifies the buffered byte size before flushing a WAL file.
-// The larger the size, the less frequently the file is written and more write performance at the expense of durability.
-// Giving 0 means it writes to a file whenever data point comes in.
-// Giving -1 disables using WAL.
+// WithWAL 指定在刷新 WAL 文件之前的缓冲区字节大小。
+// 缓冲区越大，文件写入频率越低，写入性能越高，但会降低持久性。
+// 给定 0 表示每当数据点到来时都写入文件。
+// 给定 -1 表示禁用 WAL。
 //
-// Defaults to 4096.
+// 默认为 4096。
 func WithWALBufferedSize(size int) Option {
 	return func(s *storage) {
 		s.walBufferedSize = size
 	}
 }
 
-// NewStorage gives back a new storage, which stores time-series data in the process memory by default.
+// NewStorage 返回一个新的存储，默认在进程内存中存储时序数据。
 //
-// Give the WithDataPath option for running as a on-disk storage. Specify a directory with data already exists,
-// then it will be read as the initial data.
+// 提供WithDataPath 选项以作为磁盘存储运行。指定一个已存在数据的目录，
+// 然后它将被读取为初始数据。
 func NewStorage(opts ...Option) (Storage, error) {
 	s := &storage{
 		partitionList:      newPartitionList(),
@@ -280,7 +277,7 @@ type storage struct {
 
 	logger         Logger
 	workersLimitCh chan struct{}
-	// wg must be incremented to guarantee all writes are done gracefully.
+	// wg 必须递增以保证所有写入都能优雅地完成。
 	wg sync.WaitGroup
 
 	doneCh chan struct{}
@@ -298,9 +295,8 @@ func (s *storage) InsertRows(rows []Row) error {
 		iterator := s.partitionList.newIterator()
 		n := s.partitionList.size()
 		rowsToInsert := rows
-		// Starting at the head partition, try to insert rows, and loop to insert outdated rows
-		// into older partitions. Any rows more than `writablePartitionsNum` partitions out
-		// of date are dropped.
+		// 从头部分区开始，尝试插入行，并循环将过时的行插入到较旧的分区中。
+		// 任何超过 `writablePartitionsNum` 个分区过期的行都会被丢弃。
 		for i := 0; i < n && i < writablePartitionsNum; i++ {
 			if len(rowsToInsert) == 0 {
 				break
@@ -317,15 +313,15 @@ func (s *storage) InsertRows(rows []Row) error {
 		return nil
 	}
 
-	// Limit the number of concurrent goroutines to prevent from out of memory
-	// errors and CPU trashing even if too many goroutines attempt to write.
+	// 限制并发 goroutine 的数量，以防止内存溢出错误和 CPU 争用，
+	// 即使有太多 goroutine 尝试写入也是如此。
 	select {
 	case s.workersLimitCh <- struct{}{}:
 		return insert()
 	default:
 	}
 
-	// Seems like all workers are busy; wait for up to writeTimeout
+	// 看起来所有 worker 都很忙；最多等待 writeTimeout
 
 	t := timerpool.Get(s.writeTimeout)
 	select {
@@ -339,15 +335,15 @@ func (s *storage) InsertRows(rows []Row) error {
 	}
 }
 
-// ensureActiveHead ensures the head of partitionList is an active partition.
-// If none, it creates a new one.
+// ensureActiveHead 确保 partitionList 的头部是一个活动的分区。
+// 如果没有，则创建一个新的。
 func (s *storage) ensureActiveHead() error {
 	head := s.partitionList.getHead()
 	if head != nil && head.active() {
 		return nil
 	}
 
-	// All partitions seems to be inactive so add a new partition to the list.
+	// 所有分区似乎都是不活动的，因此向列表中添加一个新分区。
 	if err := s.newPartition(nil, true); err != nil {
 		return err
 	}
@@ -368,7 +364,7 @@ func (s *storage) Select(metric string, labels []Label, start, end int64) ([]*Da
 	}
 	points := make([]*DataPoint, 0)
 
-	// Iterate over all partitions from the newest one.
+	// 从最新的分区开始遍历所有分区。
 	iterator := s.partitionList.newIterator()
 	for iterator.next() {
 		part := iterator.value()
@@ -376,11 +372,11 @@ func (s *storage) Select(metric string, labels []Label, start, end int64) ([]*Da
 			return nil, fmt.Errorf("unexpected empty partition found")
 		}
 		if part.minTimestamp() == 0 {
-			// Skip the partition that has no points.
+			// 跳过没有数据点的分区。
 			continue
 		}
 		if part.maxTimestamp() < start {
-			// No need to keep going anymore
+			// 不需要继续了
 			break
 		}
 		if part.minTimestamp() > end {
@@ -393,7 +389,7 @@ func (s *storage) Select(metric string, labels []Label, start, end int64) ([]*Da
 		if err != nil {
 			return nil, fmt.Errorf("failed to select data points: %w", err)
 		}
-		// in order to keep the order in ascending.
+		// 为了保持升序。
 		points = append(ps, points...)
 	}
 	if len(points) == 0 {
@@ -409,9 +405,9 @@ func (s *storage) Close() error {
 		return fmt.Errorf("failed to flush buffered WAL: %w", err)
 	}
 
-	// TODO: Prevent from new goroutines calling InsertRows(), for graceful shutdown.
+	// TODO: 防止新的 goroutine 调用 InsertRows()，以实现优雅关闭。
 
-	// Make all writable partitions read-only by inserting as same number of those.
+	// 通过插入相同数量的分区，使所有可写分区变为只读。
 	for i := 0; i < writablePartitionsNum; i++ {
 		if err := s.newPartition(nil, true); err != nil {
 			return err
@@ -423,7 +419,7 @@ func (s *storage) Close() error {
 	if err := s.removeExpiredPartitions(); err != nil {
 		return fmt.Errorf("failed to remove expired partitions: %w", err)
 	}
-	// All partitions have been flushed, so WAL isn't needed anymore.
+	// 所有分区都已刷新，因此不再需要 WAL。
 	if err := s.wal.removeAll(); err != nil {
 		return fmt.Errorf("failed to remove WAL: %w", err)
 	}
@@ -441,11 +437,10 @@ func (s *storage) newPartition(p partition, punctuateWal bool) error {
 	return nil
 }
 
-// flushPartitions persists all in-memory partitions ready to persisted.
-// For the in-memory mode, just removes it from the partition list.
+// flushPartitions 持久化所有准备好持久化的内存分区。
+	// 对于内存模式，只需从分区列表中删除它。
 func (s *storage) flushPartitions() error {
-	// Keep the first two partitions as is even if they are inactive,
-	// to accept out-of-order data points.
+	// 保留前两个分区不变，即使它们是不活动的，以接受乱序数据点。
 	i := 0
 	iterator := s.partitionList.newIterator()
 	for iterator.next() {
@@ -469,8 +464,8 @@ func (s *storage) flushPartitions() error {
 			continue
 		}
 
-		// Start swapping in-memory partition for disk one.
-		// The disk partition will place at where in-memory one existed.
+		// 开始将内存分区交换为磁盘分区。
+		// 磁盘分区将放置在内存分区所在的位置。
 
 		dir := filepath.Join(s.dataPath, fmt.Sprintf("p-%d-%d", memPart.minTimestamp(), memPart.maxTimestamp()))
 		if err := s.flush(dir, memPart); err != nil {
@@ -497,7 +492,7 @@ func (s *storage) flushPartitions() error {
 	return nil
 }
 
-// flush compacts the data points in the given partition and flushes them to the given directory.
+// flush 压缩给定分区中的数据点，并将它们刷新到给定目录。
 func (s *storage) flush(dirPath string, m *memoryPartition) error {
 	if dirPath == "" {
 		return fmt.Errorf("dir path is required")
@@ -555,11 +550,8 @@ func (s *storage) flush(dirPath string, m *memoryPartition) error {
 		Metrics:       metrics,
 		CreatedAt:     time.Now(),
 	})
-	if err != nil {
-		return fmt.Errorf("failed to encode metadata: %w", err)
-	}
 
-	// It should write the meta file at last because what valid meta file exists proves the disk partition is valid.
+	// 应该最后写入 meta 文件，因为有效的 meta 文件存在证明磁盘分区是有效的。
 	metaPath := filepath.Join(dirPath, metaFileName)
 	if err := os.WriteFile(metaPath, b, fs.ModePerm); err != nil {
 		return fmt.Errorf("failed to write metadata to %s: %w", metaPath, err)
@@ -588,7 +580,7 @@ func (s *storage) removeExpiredPartitions() error {
 	return nil
 }
 
-// recoverWAL inserts all records within the given wal, and then removes all WAL segment files.
+// recoverWAL 插入给定 WAL 中的所有记录，然后删除所有 WAL 段文件。
 func (s *storage) recoverWAL(walDir string) error {
 	reader, err := newDiskWALReader(walDir)
 	if errors.Is(err, os.ErrNotExist) {

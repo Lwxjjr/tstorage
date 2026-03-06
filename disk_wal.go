@@ -15,9 +15,9 @@ import (
 	"sync/atomic"
 )
 
-// diskWAL contains multiple segment files. One segment is responsible for one partition.
-// They can be easily sorted because they are named using the created timestamp.
-// Macro layout is like:
+// diskWAL 包含多个段文件。一个段负责一个分区。
+// 它们可以很容易地排序，因为它们使用创建的时间戳命名。
+// 宏观布局如下：
 /*
   .wal/
   ├── 0
@@ -26,9 +26,9 @@ import (
 type diskWAL struct {
 	dir          string
 	bufferedSize int
-	// Buffered-writer to the active segment
+	// 活动段的缓冲写入器
 	w *bufio.Writer
-	// File descriptor to the active segment
+	// 活动段的文件描述符
 	fd    *os.File
 	index uint32
 	mu    sync.Mutex
@@ -52,7 +52,7 @@ func newDiskWAL(dir string, bufferedSize int) (wal, error) {
 	return w, nil
 }
 
-// append appends the given entry to the end of a file via the file descriptor it has.
+// append 通过它拥有的文件描述符将给定的条目追加到文件的末尾。
 func (w *diskWAL) append(op walOperation, rows []Row) error {
 	w.mu.Lock()
 	defer w.mu.Unlock()
@@ -60,28 +60,28 @@ func (w *diskWAL) append(op walOperation, rows []Row) error {
 	switch op {
 	case operationInsert:
 		for _, row := range rows {
-			// Write the operation type
+			// 写入操作类型
 			if err := w.w.WriteByte(byte(op)); err != nil {
 				return fmt.Errorf("failed to write operation: %w", err)
 			}
 			name := marshalMetricName(row.Metric, row.Labels)
-			// Write the length of the metric name
+			// 写入指标名称的长度
 			lBuf := make([]byte, binary.MaxVarintLen64)
 			n := binary.PutUvarint(lBuf, uint64(len(name)))
 			if _, err := w.w.Write(lBuf[:n]); err != nil {
 				return fmt.Errorf("failed to write the length of the metric name: %w", err)
 			}
-			// Write the metric name
+			// 写入指标名称
 			if _, err := w.w.WriteString(name); err != nil {
 				return fmt.Errorf("failed to write the metric name: %w", err)
 			}
-			// Write the timestamp
+			// 写入时间戳
 			tsBuf := make([]byte, binary.MaxVarintLen64)
 			n = binary.PutVarint(tsBuf, row.DataPoint.Timestamp)
 			if _, err := w.w.Write(tsBuf[:n]); err != nil {
 				return fmt.Errorf("failed to write the timestamp: %w", err)
 			}
-			// Write the value
+			// 写入值
 			vBuf := make([]byte, binary.MaxVarintLen64)
 			n = binary.PutUvarint(vBuf, math.Float64bits(row.DataPoint.Value))
 			if _, err := w.w.Write(vBuf[:n]); err != nil {
@@ -98,7 +98,7 @@ func (w *diskWAL) append(op walOperation, rows []Row) error {
 	return nil
 }
 
-// flush flushes all buffered entries to the underlying file.
+// flush 将所有缓冲的条目刷新到底层文件。
 func (w *diskWAL) flush() error {
 	if err := w.w.Flush(); err != nil {
 		return fmt.Errorf("failed to flush buffered-data into the underlying WAL file: %w", err)
@@ -106,7 +106,7 @@ func (w *diskWAL) flush() error {
 	return nil
 }
 
-// punctuate set boundary and creates a new segment.
+// punctuate 设置边界并创建一个新的段。
 func (w *diskWAL) punctuate() error {
 	w.mu.Lock()
 	defer w.mu.Unlock()
@@ -125,7 +125,7 @@ func (w *diskWAL) punctuate() error {
 	return nil
 }
 
-// truncateOldest removes only the oldest segment.
+// truncateOldest 仅删除最旧的段。
 func (w *diskWAL) removeOldest() error {
 	w.mu.Lock()
 	defer w.mu.Unlock()
@@ -139,7 +139,7 @@ func (w *diskWAL) removeOldest() error {
 	return os.RemoveAll(filepath.Join(w.dir, files[0].Name()))
 }
 
-// removeAll removes all segment files.
+// removeAll 删除所有段文件。
 func (w *diskWAL) removeAll() error {
 	w.mu.Lock()
 	defer w.mu.Unlock()
@@ -152,7 +152,7 @@ func (w *diskWAL) removeAll() error {
 	return os.MkdirAll(w.dir, fs.ModePerm)
 }
 
-// refresh removes all segment files and make a new segment.
+// refresh 删除所有段文件并创建一个新段。
 func (w *diskWAL) refresh() error {
 	if err := w.removeAll(); err != nil {
 		return err
@@ -169,7 +169,7 @@ func (w *diskWAL) refresh() error {
 	return nil
 }
 
-// createSegmentFile creates a new file with the name of the numbering index.
+// createSegmentFile 使用编号索引的名称创建一个新文件。
 func (w *diskWAL) createSegmentFile(dir string) (*os.File, error) {
 	name := strconv.Itoa(int(atomic.LoadUint32(&w.index)))
 	f, err := os.OpenFile(filepath.Join(dir, name), os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
@@ -204,7 +204,7 @@ func newDiskWALReader(dir string) (*diskWALReader, error) {
 	}, nil
 }
 
-// readAll reads all segment files and caches the result for each operation.
+// readAll 读取所有段文件并缓存每个操作的结果。
 func (f *diskWALReader) readAll() error {
 	for _, file := range f.files {
 		if file.IsDir() {
@@ -231,7 +231,7 @@ func (f *diskWALReader) readAll() error {
 
 		err = segment.error()
 		if errors.Is(err, io.ErrUnexpectedEOF) || errors.Is(err, io.EOF) {
-			// It is not unusual for a line to be invalid, as it may well terminate in the middle of writing to the WAL.
+			// 一行无效并不罕见，因为它可能在写入 WAL 的过程中终止。
 			return nil
 		}
 		if err != nil {
@@ -241,11 +241,11 @@ func (f *diskWALReader) readAll() error {
 	return nil
 }
 
-// segment represents a segment file.
+// segment 表示一个段文件。
 type segment struct {
 	file *os.File
 	r    *bufio.Reader
-	// FIXME: Use interface to support other operation type
+	// FIXME: 使用接口来支持其他操作类型
 	current walRecord
 	err     error
 }
@@ -261,25 +261,25 @@ func (f *segment) next() bool {
 	}
 	switch walOperation(op) {
 	case operationInsert:
-		// Read the length of metric name.
+		// 读取指标名称的长度。
 		metricLen, err := binary.ReadUvarint(f.r)
 		if err != nil {
 			f.err = fmt.Errorf("failed to read the length of metric name: %w", err)
 			return false
 		}
-		// Read the metric name.
+		// 读取指标名称。
 		metric := make([]byte, int(metricLen))
 		if _, err := io.ReadFull(f.r, metric); err != nil {
 			f.err = fmt.Errorf("failed to read the metric name: %w", err)
 			return false
 		}
-		// Read timestamp.
+		// 读取时间戳。
 		ts, err := binary.ReadVarint(f.r)
 		if err != nil {
 			f.err = fmt.Errorf("failed to read timestamp: %w", err)
 			return false
 		}
-		// Read value.
+		// 读取值。
 		val, err := binary.ReadUvarint(f.r)
 		if err != nil {
 			f.err = fmt.Errorf("failed to read value: %w", err)
@@ -303,7 +303,7 @@ func (f *segment) next() bool {
 	return true
 }
 
-// error gives back an error if it has been facing an error while reading.
+// error 如果在读取过程中遇到错误，则返回错误。
 func (f *segment) error() error {
 	return f.err
 }

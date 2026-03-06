@@ -1,36 +1,34 @@
 package tstorage
 
-// partition is a chunk of time-series data with the timestamp range.
-// A partition acts as a fully independent database containing all data
-// points for its time range.
+// partition 是一个带有时间戳范围的时序数据块。
+// 分区作为一个完全独立的数据库，包含其时间范围内的所有数据点。
 //
-// The partition's lifecycle is: Writable -> ReadOnly.
-// *Writable*:
-//   it can be written. Only one partition can be writable within a partition list.
-// *ReadOnly*:
-//   it can't be written. Partitions will be ReadOnly if it exceeds the partition range.
+// 分区的生命周期为：可写 -> 只读。
+// *可写*：
+//   可以写入数据。分区列表中只能有一个分区是可写的。
+// *只读*：
+//   不能写入数据。如果分区超出了分区范围，则变为只读。
 type partition interface {
-	// Write operations
+	// 写入操作
 	//
-	// insertRows is a goroutine safe way to insert data points into itself.
-	// If data points older than its min timestamp were given, they won't be
-	// ingested, instead, gave back as a first returned value.
+	// insertRows 是一种 goroutine 安全的方式，用于向自身插入数据点。
+	// 如果给定的数据点早于其最小时间戳，则不会被摄取，而是作为第一个返回值返回。
 	insertRows(rows []Row) (outdatedRows []Row, err error)
-	// clean removes everything managed by this partition.
+	// clean 删除由此分区管理的所有内容。
 	clean() error
 
-	// Read operations
+	// 读取操作
 	//
-	// selectDataPoints gives back certain metric's data points within the given range.
+	// selectDataPoints 返回给定范围内某个指标的数据点。
 	selectDataPoints(metric string, labels []Label, start, end int64) ([]*DataPoint, error)
-	// minTimestamp returns the minimum Unix timestamp in milliseconds.
+	// minTimestamp 返回最小的 Unix 时间戳（毫秒）。
 	minTimestamp() int64
-	// maxTimestamp returns the maximum Unix timestamp in milliseconds.
+	// maxTimestamp 返回最大的 Unix 时间戳（毫秒）。
 	maxTimestamp() int64
-	// size returns the number of data points the partition holds.
+	// size 返回分区持有的数据点数量。
 	size() int
-	// active means not only writable but having the qualities to be the head partition.
+	// active 表示不仅可写，还具有作为头部分区的特性。
 	active() bool
-	// expired means it should get removed.
+	// expired 表示应该被删除。
 	expired() bool
 }

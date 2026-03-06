@@ -29,18 +29,18 @@ import (
 	"io"
 )
 
-// bstream is a stream of bits.
+// bstream 是一个位流。
 type bstream struct {
-	stream []byte // the data stream
-	count  uint8  // how many bits are valid in current byte
+	stream []byte // 数据流
+	count  uint8  // 当前字节中有多少位是有效的
 }
 
 func (b *bstream) bytes() []byte {
 	return b.stream
 }
 
-// reset resets the buffer to be empty,
-// but it retains the underlying storage for use by future writes.
+// reset 将缓冲区重置为空，
+// 但它保留底层存储以供将来写入使用。
 func (b *bstream) reset() {
 	b.stream = b.stream[:0]
 	b.count = 0
@@ -102,10 +102,10 @@ func (b *bstream) writeBits(u uint64, nbits int) {
 
 type bstreamReader struct {
 	stream       []byte
-	streamOffset int // The offset from which read the next byte from the stream.
+	streamOffset int // 从流中读取下一个字节的偏移量。
 
-	buffer uint64 // The current buffer, filled from the stream, containing up to 8 bytes from which read bits.
-	valid  uint8  // The number of bits valid to read (from left) in the current buffer.
+	buffer uint64 // 当前缓冲区，从流中填充，包含多达 8 个字节，用于读取位。
+	valid  uint8  // 当前缓冲区中有效读取的位数（从左侧开始）。
 }
 
 func newBReader(b []byte) bstreamReader {
@@ -124,10 +124,10 @@ func (b *bstreamReader) readBit() (bit, error) {
 	return b.readBitFast()
 }
 
-// readBitFast is like readBit but can return io.EOF if the internal buffer is empty.
-// If it returns io.EOF, the caller should retry reading bits calling readBit().
-// This function must be kept small and a leaf in order to help the compiler inlining it
-// and further improve performances.
+// readBitFast 类似于 readBit，但如果内部缓冲区为空，可以返回 io.EOF。
+	// 如果返回 io.EOF，调用者应该重试读取位，调用 readBit()。
+	// 这个函数必须保持小且作为叶子函数，以帮助编译器内联它
+	// 并进一步提高性能。
 func (b *bstreamReader) readBitFast() (bit, error) {
 	if b.valid == 0 {
 		return false, io.EOF
@@ -149,7 +149,7 @@ func (b *bstreamReader) readBits(nbits uint8) (uint64, error) {
 		return b.readBitsFast(nbits)
 	}
 
-	// We have to read all remaining valid bits from the current buffer and a part from the next one.
+	// 我们必须从当前缓冲区读取所有剩余的有效位，并从下一个缓冲区读取一部分。
 	bitmask := (uint64(1) << b.valid) - 1
 	nbits -= b.valid
 	v := (b.buffer & bitmask) << nbits
@@ -166,10 +166,10 @@ func (b *bstreamReader) readBits(nbits uint8) (uint64, error) {
 	return v, nil
 }
 
-// readBitsFast is like readBits but can return io.EOF if the internal buffer is empty.
-// If it returns io.EOF, the caller should retry reading bits calling readBits().
-// This function must be kept small and a leaf in order to help the compiler inlining it
-// and further improve performances.
+// readBitsFast 类似于 readBits，但如果内部缓冲区为空，可以返回 io.EOF。
+	// 如果返回 io.EOF，调用者应该重试读取位，调用 readBits()。
+	// 这个函数必须保持小且作为叶子函数，以帮助编译器内联它
+	// 并进一步提高性能。
 func (b *bstreamReader) readBitsFast(nbits uint8) (uint64, error) {
 	if nbits > b.valid {
 		return 0, io.EOF
@@ -189,18 +189,16 @@ func (b *bstreamReader) ReadByte() (byte, error) {
 	return byte(v), nil
 }
 
-// loadNextBuffer loads the next bytes from the stream into the internal buffer.
-// The input nbits is the minimum number of bits that must be read, but the implementation
-// can read more (if possible) to improve performances.
+// loadNextBuffer 从流中将下一个字节加载到内部缓冲区中。
+	// 输入 nbits 是必须读取的最小位数，但实现
+	// 可以读取更多（如果可能）以提高性能。
 func (b *bstreamReader) loadNextBuffer(nbits uint8) bool {
 	if b.streamOffset >= len(b.stream) {
 		return false
 	}
 
-	// Handle the case there are more then 8 bytes in the buffer (most common case)
-	// in a optimized way. It's guaranteed that this branch will never read from the
-	// very last byte of the stream (which suffers race conditions due to concurrent
-	// writes).
+	// 以优化的方式处理缓冲区中有超过 8 个字节的情况（最常见的情况）。
+	// 保证这个分支永远不会从流的最后一个字节读取（由于并发写入，这会遭受竞争条件）。
 	if b.streamOffset+8 < len(b.stream) {
 		b.buffer = binary.BigEndian.Uint64(b.stream[b.streamOffset:])
 		b.streamOffset += 8
@@ -208,10 +206,10 @@ func (b *bstreamReader) loadNextBuffer(nbits uint8) bool {
 		return true
 	}
 
-	// We're here if the are 8 or less bytes left in the stream. Since this reader needs
-	// to handle race conditions with concurrent writes happening on the very last byte
-	// we make sure to never over more than the minimum requested bits (rounded up to
-	// the next byte). The following code is slower but called less frequently.
+	// 如果流中剩余 8 个或更少的字节，我们就在这里。由于此读取器需要
+	// 处理与在最后一个字节上发生的并发写入的竞争条件，
+	// 我们确保永远不会读取超过请求的最小位数（四舍五入到下一个字节）。
+	// 以下代码较慢，但调用频率较低。
 	nbytes := int((nbits / 8) + 1)
 	if b.streamOffset+nbytes > len(b.stream) {
 		nbytes = len(b.stream) - b.streamOffset

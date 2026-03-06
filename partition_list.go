@@ -7,44 +7,44 @@ import (
 	"sync/atomic"
 )
 
-// partitionList represents a linked list for partitions.
-// Each partition is arranged in order order of newest to oldest.
-// That is, the head node is always the newest, the tail node is the oldest.
+// partitionList 表示分区的链表。
+// 每个分区按从最新到最旧的顺序排列。
+// 也就是说，头节点始终是最新的，尾节点是最旧的。
 //
-// Head and its next partitions must be writable to accept out-of-order data points
-// even if it's inactive.
+// 头部及其下一个分区必须是可写的，以接受乱序数据点，
+// 即使它是不活动的。
 type partitionList interface {
-	// insert appends a new node to the head.
+	// insert 将一个新节点追加到头部。
 	insert(partition partition)
-	// remove eliminates the given partition from the list.
+	// remove 从列表中删除给定的分区。
 	remove(partition partition) error
-	// swap replaces the old partition with the new one.
+	// swap 用新分区替换旧分区。
 	swap(old, new partition) error
-	// getHead gives back the head node which is the newest one.
+	// getHead 返回作为最新节点的头节点。
 	getHead() partition
-	// size returns the number of partitions of itself.
+	// size 返回它自己的分区数量。
 	size() int
-	// newIterator gives back the iterator object fot this list.
-	// If you need to inspect all nodes within the list, use this one.
+	// newIterator 返回此列表的迭代器对象。
+	// 如果需要检查列表中的所有节点，请使用此方法。
 	newIterator() partitionIterator
 
 	String() string
 }
 
-// Iterator represents an iterator for partition list. The basic usage is:
+// Iterator 表示分区列表的迭代器。基本用法如下：
 /*
   for iterator.next() {
     partition, err := iterator.value()
-    // Do something with partition
+    // 使用分区做些什么
   }
 */
 type partitionIterator interface {
-	// next positions the iterator at the next node in the list.
-	// It will be positioned at the head on the first call.
-	// The return value will be true if a value can be read from the list.
+	// next 将迭代器定位到列表中的下一个节点。
+	// 第一次调用时将定位到头部。
+	// 如果可以从列表中读取值，则返回值为 true。
 	next() bool
-	// value gives back the current partition in the iterator.
-	// If it was called even though next() returns false, it will return nil.
+	// value 返回迭代器中的当前分区。
+	// 即使在 next() 返回 false 时调用它，也会返回 nil。
 	value() partition
 
 	currentNode() *partitionNode
@@ -90,7 +90,7 @@ func (p *partitionListImpl) remove(target partition) error {
 		return fmt.Errorf("empty partition")
 	}
 
-	// Iterate over itself from the head.
+	// 从头开始遍历自身。
 	var prev, next *partitionNode
 	iterator := p.newIterator()
 	for iterator.next() {
@@ -100,20 +100,20 @@ func (p *partitionListImpl) remove(target partition) error {
 			continue
 		}
 
-		// remove the current node.
+		// 删除当前节点。
 
 		iterator.next()
 		next = iterator.currentNode()
 		switch {
 		case prev == nil:
-			// removing the head node
+			// 删除头节点
 			p.setHead(next)
 		case next == nil:
-			// removing the tail node
+			// 删除尾节点
 			prev.setNext(nil)
 			p.setTail(prev)
 		default:
-			// removing the middle node
+			// 删除中间节点
 			prev.setNext(next)
 		}
 		atomic.AddInt64(&p.numPartitions, -1)
@@ -132,7 +132,7 @@ func (p *partitionListImpl) swap(old, new partition) error {
 		return fmt.Errorf("empty partition")
 	}
 
-	// Iterate over itself from the head.
+	// 从头开始遍历自身。
 	var prev, next *partitionNode
 	iterator := p.newIterator()
 	for iterator.next() {
@@ -142,7 +142,7 @@ func (p *partitionListImpl) swap(old, new partition) error {
 			continue
 		}
 
-		// swap the current node.
+		// 交换当前节点。
 
 		newNode := &partitionNode{
 			val:  new,
@@ -152,10 +152,10 @@ func (p *partitionListImpl) swap(old, new partition) error {
 		next = iterator.currentNode()
 		switch {
 		case prev == nil:
-			// swapping the head node
+			// 交换头节点
 			p.setHead(newNode)
 		case next == nil:
-			// swapping the tail node
+			// 交换尾节点
 			prev.setNext(newNode)
 			p.setTail(newNode)
 		default:

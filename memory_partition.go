@@ -8,21 +8,21 @@ import (
 	"time"
 )
 
-// A memoryPartition implements a partition to store data points on heap.
-// It offers a goroutine safe capabilities.
+// memoryPartition 实现了一个在堆上存储数据点的分区。
+	// 它提供了 goroutine 安全的功能。
 type memoryPartition struct {
-	// The number of data points
+	// 数据点的数量
 	numPoints int64
-	// minT is immutable.
+	// minT 是不可变的。
 	minT int64
 	maxT int64
 
-	// A hash map from metric name to memoryMetric.
+	// 从指标名称到 memoryMetric 的哈希映射。
 	metrics sync.Map
 
-	// Write ahead log.
+	// 预写日志。
 	wal wal
-	// The timestamp range of partitions after which they get persisted
+	// 分区持久化后的时间戳范围
 	partitionDuration  int64
 	timestampPrecision TimestampPrecision
 	once               sync.Once
@@ -52,18 +52,18 @@ func newMemoryPartition(wal wal, partitionDuration time.Duration, precision Time
 	}
 }
 
-// insertRows inserts the given rows to partition.
+// insertRows 将给定的行插入到分区中。
 func (m *memoryPartition) insertRows(rows []Row) ([]Row, error) {
 	if len(rows) == 0 {
 		return nil, fmt.Errorf("no rows given")
 	}
-	// FIXME: Just emitting log is enough
+	// FIXME: 仅发出日志就足够了
 	err := m.wal.append(operationInsert, rows)
 	if err != nil {
 		return nil, fmt.Errorf("failed to write to WAL: %w", err)
 	}
 
-	// Set min timestamp at only first.
+	// 仅在第一次时设置最小时间戳。
 	m.once.Do(func() {
 		min := rows[0].Timestamp
 		for i := range rows {
@@ -97,7 +97,7 @@ func (m *memoryPartition) insertRows(rows []Row) ([]Row, error) {
 	}
 	atomic.AddInt64(&m.numPoints, rowsNum)
 
-	// Make max timestamp up-to-date.
+	// 更新最大时间戳。
 	if atomic.LoadInt64(&m.maxT) < maxTimestamp {
 		atomic.SwapInt64(&m.maxT, maxTimestamp)
 	}
@@ -126,8 +126,8 @@ func (m *memoryPartition) selectDataPoints(metric string, labels []Label, start,
 	return mt.selectPoints(start, end), nil
 }
 
-// getMetric gives back the reference to the metrics list whose name is the given one.
-// If none, it creates a new one.
+// getMetric 返回名称为给定名称的指标列表的引用。
+	// 如果不存在，则创建一个新的。
 func (m *memoryPartition) getMetric(name string) *memoryMetric {
 	value, ok := m.metrics.Load(name)
 	if !ok {
@@ -158,8 +158,8 @@ func (m *memoryPartition) active() bool {
 }
 
 func (m *memoryPartition) clean() error {
-	// What all data managed by memoryPartition is on heap that is automatically removed by GC.
-	// So do nothing.
+	// memoryPartition 管理的所有数据都在堆上，会自动被 GC 删除。
+	// 所以什么都不做。
 	return nil
 }
 
@@ -167,13 +167,13 @@ func (m *memoryPartition) expired() bool {
 	return false
 }
 
-// memoryMetric has a list of ordered data points that belong to the memoryMetric
+// memoryMetric 具有属于该指标的有序数据点列表
 type memoryMetric struct {
 	name         string
 	size         int64
 	minTimestamp int64
 	maxTimestamp int64
-	// points must kept in order
+	// points 必须保持有序
 	points           []*DataPoint
 	outOfOrderPoints []*DataPoint
 	mu               sync.RWMutex
@@ -181,8 +181,8 @@ type memoryMetric struct {
 
 func (m *memoryMetric) insertPoint(point *DataPoint) {
 	size := atomic.LoadInt64(&m.size)
-	// TODO: Consider to stop using mutex every time.
-	//   Instead, fix the capacity of points slice, kind of like:
+	// TODO: 考虑停止每次都使用互斥锁。
+	//   相反，修复 points 切片的容量，类似于：
 	/*
 		m.points := make([]*DataPoint, 1000)
 		for i := 0; i < 1000; i++ {
@@ -192,7 +192,7 @@ func (m *memoryMetric) insertPoint(point *DataPoint) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
-	// First insertion
+	// 第一次插入
 	if size == 0 {
 		m.points = append(m.points, point)
 		atomic.StoreInt64(&m.minTimestamp, point.Timestamp)
@@ -200,7 +200,7 @@ func (m *memoryMetric) insertPoint(point *DataPoint) {
 		atomic.AddInt64(&m.size, 1)
 		return
 	}
-	// Insert point in order
+	// 按顺序插入点
 	if m.points[size-1].Timestamp < point.Timestamp {
 		m.points = append(m.points, point)
 		atomic.StoreInt64(&m.maxTimestamp, point.Timestamp)
@@ -211,7 +211,7 @@ func (m *memoryMetric) insertPoint(point *DataPoint) {
 	m.outOfOrderPoints = append(m.outOfOrderPoints, point)
 }
 
-// selectPoints returns a new slice by re-slicing with [startIdx:endIdx].
+// selectPoints 通过使用 [startIdx:endIdx] 重新切片来返回一个新切片。
 func (m *memoryMetric) selectPoints(start, end int64) []*DataPoint {
 	size := atomic.LoadInt64(&m.size)
 	minTimestamp := atomic.LoadInt64(&m.minTimestamp)
@@ -227,7 +227,7 @@ func (m *memoryMetric) selectPoints(start, end int64) []*DataPoint {
 	if start <= minTimestamp {
 		startIdx = 0
 	} else {
-		// Use binary search because points are in-order.
+		// 使用二分查找，因为 points 是有序的。
 		startIdx = sort.Search(int(size), func(i int) bool {
 			return m.points[i].Timestamp >= start
 		})
@@ -236,7 +236,7 @@ func (m *memoryMetric) selectPoints(start, end int64) []*DataPoint {
 	if end >= maxTimestamp {
 		endIdx = int(size)
 	} else {
-		// Use binary search because points are in-order.
+		// 使用二分查找，因为 points 是有序的。
 		endIdx = sort.Search(int(size), func(i int) bool {
 			return m.points[i].Timestamp >= end
 		})
@@ -244,8 +244,7 @@ func (m *memoryMetric) selectPoints(start, end int64) []*DataPoint {
 	return m.points[startIdx:endIdx]
 }
 
-// encodeAllPoints uses the given seriesEncoder to encode all metric data points in order by timestamp,
-// including outOfOrderPoints.
+// encodeAllPoints 使用给定的 seriesEncoder 按时间戳顺序编码所有指标数据点，包括 outOfOrderPoints。
 func (m *memoryMetric) encodeAllPoints(encoder seriesEncoder) error {
 	sort.Slice(m.outOfOrderPoints, func(i, j int) bool {
 		return m.outOfOrderPoints[i].Timestamp < m.outOfOrderPoints[j].Timestamp
