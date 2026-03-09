@@ -1,0 +1,447 @@
+╔══════════════════════════════════════════════════════════════════════════════╗
+║                    partitionNode vs Partition 关系详解                          ║
+╚══════════════════════════════════════════════════════════════════════════════╝
+
+
+╔══════════════════════════════════════════════════════════════════════════════╗
+║                          核心概念                                               ║
+╚══════════════════════════════════════════════════════════════════════════════╝
+
+partitionNode 和 partition 是**包装器（Wrapper）**和**被包装对象**的关系：
+
+┌─────────────────────────────────────────────────────────────────────────────┐
+│                                                                             │
+│  partitionNode (链表节点)                                                    │
+│  ┌───────────────────────────────────────────────────────────────────────┐  │
+│  │  val: partition  ←──────  指向实际的分区对象                          │  │
+│  │  next: *partitionNode  ←──  指向下一个链表节点                        │  │
+│  │  mu: sync.RWMutex       ←──  节点级锁                                 │  │
+│  └───────────────────────────────────────────────────────────────────────┘  │
+│                                                                             │
+└─────────────────────────────────────────────────────────────────────────────┘
+                              │
+                              │ 持有 (contains)
+                              │
+                              ▼
+┌─────────────────────────────────────────────────────────────────────────────┐
+│                                                                             │
+│  partition (接口)                                                           │
+│  ┌───────────────────────────────────────────────────────────────────────┐  │
+│  │  interface partition {                                                 │  │
+│  │      insertRows(rows []Row) ([]Row, error)                            │  │
+│  │      selectDataPoints(...) ([]*DataPoint, error)                      │  │
+│  │      minTimestamp() int64                                             │  │
+│  │      maxTimestamp() int64                                             │  │
+│  │      ...                                                              │  │
+│  │  }                                                                    │  │
+│  └───────────────────────────────────────────────────────────────────────┘  │
+│                              │                                               │
+│                              │ 实现 (implements)                            │
+│                              │                                               │
+│          ┌───────────────────┴───────────────────┐                         │
+│          │                                       │                         │
+│          ▼                                       ▼                         │
+│  ┌───────────────┐                    ┌───────────────┐                   │
+│  │memoryPartition│                    │diskPartition  │                   │
+│  │   (内存分区)   │                    │   (磁盘分区)   │                   │
+│  └───────────────┘                    └───────────────┘                   │
+│                                                                             │
+└─────────────────────────────────────────────────────────────────────────────┘
+
+
+╔══════════════════════════════════════════════════════════════════════════════╗
+║                          类比说明                                             ║
+╚══════════════════════════════════════════════════════════════════════════════╝
+
+📦 快递包裹类比：
+
+partitionNode ≈ 快递包裹（盒子）
+├─ val: 实际的物品（partition 对象）
+├─ next: 下一个包裹的地址
+└─ mu: 包裹的锁（防止被别人打开）
+
+partition ≈ 物品（接口）
+├─ 可以是衣服（memoryPartition）
+├─ 可以是书籍（diskPartition）
+└─ 可以是电子产品（未来的扩展类型）
+
+关系：
+├─ 包裹（partitionNode）包装了物品（partition）
+├─ 包裹知道下一个包裹在哪里（next 指针）
+├─ 通过包裹可以拿到物品（partitionNode.value()）
+└─ 包裹本身不关心物品是什么类型（多态）
+
+
+╔══════════════════════════════════════════════════════════════════════════════╗
+║                          代码定义对比                                          ║
+╚══════════════════════════════════════════════════════════════════════════════╝
+
+【partitionNode - 链表节点】
+
+type partitionNode struct {
+    // val is immutable  ← 注释说明：val 是不可变的
+    val  partition        ← 持有 partition 接口对象
+    next *partitionNode   ← 指向下一个节点
+    mu   sync.RWMutex     ← 节点级锁
+}
+
+作用：
+├─ 链表的基本单元
+├─ 包装 partition 对象
+├─ 维护链表的连接关系
+└─ 提供节点级并发控制
+
+关键方法：
+├─ value() partition      ← 获取实际的 partition 对象
+├─ setNext(node)          ← 设置下一个节点
+└─ getNext() *partitionNode ← 获取下一个节点
+
+
+【partition - 分区接口】
+
+type partition interface {
+    // 写入操作
+    insertRows(rows []Row) (outdatedRows []Row, err error)
+    clean() error
+
+    // 读取操作
+    selectDataPoints(metric string, labels []Label, start, end int64) ([]*DataPoint, error)
+
+    // 元数据
+    minTimestamp() int64
+    maxTimestamp() int64
+    size() int
+    active() bool
+    expired() bool
+}
+
+作用：
+├─ 定义分区的统一行为
+├─ 支持多态（不同类型的分区）
+├─ 隐藏具体实现细节
+└─ 简化上层调用
+
+实现：
+├─ memoryPartition（内存分区）
+└─ diskPartition（磁盘分区）
+
+
+╔══════════════════════════════════════════════════════════════════════════════╗
+║                          为什么需要 partitionNode？                            ║
+╚══════════════════════════════════════════════════════════════════════════════╝
+
+如果直接使用 partition 而不使用 partitionNode：
+
+❌ 问题1：无法维护链表结构
+
+type partitionList struct {
+    head partition  ← 问题：partition 接口没有 next 指针！
+    tail partition
+}
+
+// 无法形成链表
+// partition 接口中没有定义 next 字段
+// 无法实现链表的遍历
+
+✅ 解决方案：使用 partitionNode 包装
+
+type partitionNode struct {
+    val  partition        ← 实际的分区对象
+    next *partitionNode   ← 链表连接的关键！
+}
+
+type partitionList struct {
+    head *partitionNode   ← 可以形成链表
+    tail *partitionNode
+}
+
+
+❌ 问题2：无法实现节点级锁
+
+// 如果直接用 partition
+type partitionList struct {
+    partitions []partition  ← 无法对单个节点加锁
+    mu         sync.RWMutex  ← 只能对整个列表加锁
+}
+
+// 删除一个节点时，需要锁定整个列表
+// 影响并发性能
+
+✅ 解决方案：partitionNode 有自己的锁
+
+type partitionNode struct {
+    val  partition
+    next *partitionNode
+    mu   sync.RWMutex  ← 节点级锁
+}
+
+// 可以只锁定当前节点
+// 不影响其他节点的操作
+
+
+❌ 问题3：无法区分"节点"和"内容"
+
+// partition 是一个接口，定义了分区行为
+// 但它本身不知道自己在链表中的位置
+
+✅ 解决方案：分离关注点
+
+partitionNode:
+├─ 知道自己在链表中的位置（next 指针）
+├─ 管理链表连接
+└─ 包装实际的分区对象
+
+partition:
+├─ 只关心分区的行为（读写、查询）
+├─ 不知道链表的存在
+└─ 专注于数据存储
+
+
+╔══════════════════════════════════════════════════════════════════════════════╗
+║                          实际使用示例                                           ║
+╚══════════════════════════════════════════════════════════════════════════════╝
+
+【创建新分区并插入链表】
+
+// 1. 创建内存分区对象
+memPart := newMemoryPartition(wal, duration, precision)
+// memPart 类型是 *memoryPartition，实现了 partition 接口
+
+// 2. 创建链表节点，包装分区对象
+node := &partitionNode{
+    val:  memPart,      ← 将分区对象包装在节点中
+    next: nil,          ← 新节点暂时没有下一个节点
+}
+
+// 3. 插入到链表头部
+if head != nil {
+    node.next = head    ← 新节点的 next 指向旧头节点
+}
+p.setHead(node)        ← 更新头指针
+
+链表结构：
+node (新)
+    ↓ next
+head (旧) → [Mem1] → [Mem2] → [Disk1] → nil
+
+
+【遍历链表】
+
+// 1. 创建迭代器
+iterator := p.newIterator()
+
+// 2. 遍历
+for iterator.next() {
+    node := iterator.currentNode()  ← 获取当前节点 (partitionNode)
+    part := node.value()            ← 获取实际的分区对象 (partition)
+
+    // 3. 使用分区对象（多态）
+    switch p := part.(type) {
+    case *memoryPartition:
+        // 处理内存分区
+        fmt.Println("内存分区，大小:", p.size())
+    case *diskPartition:
+        // 处理磁盘分区
+        fmt.Println("磁盘分区，目录:", p.dirPath)
+    }
+}
+
+执行流程：
+┌─────────────────────────────────────────────────────────────┐
+│ iterator.next()                                              │
+│   ↓                                                          │
+│ node = iterator.currentNode()  ← partitionNode 对象         │
+│   ↓                                                          │
+│ part = node.value()            ← partition 接口对象          │
+│   ↓                                                          │
+│ 使用 part (多态调用)                                        │
+│   ├─ 如果是 memoryPartition → 调用内存分区方法              │
+│   └─ 如果是 diskPartition   → 调用磁盘分区方法              │
+└─────────────────────────────────────────────────────────────┘
+
+
+【删除分区】
+
+// 1. 找到要删除的节点
+iterator := p.newIterator()
+for iterator.next() {
+    current := iterator.currentNode()
+    if samePartitions(current.value(), target) {
+        // 找到目标节点
+        break
+    }
+}
+
+// 2. 从链表中移除节点
+switch {
+case prev == nil:
+    // 删除头节点
+    p.setHead(next)  ← 更新 head 指针
+case next == nil:
+    // 删除尾节点
+    prev.setNext(nil)
+    p.setTail(prev)
+default:
+    // 删除中间节点
+    prev.setNext(next)  ← 跳过当前节点
+}
+
+// 3. 清理分区资源
+current.value().clean()  ← 调用 partition 接口的方法
+
+删除前：
+[Prev] → [Current] → [Next] → ...
+
+删除后：
+[Prev] → [Next] → ...
+
+注意：partitionNode 负责链表操作，partition 负责资源清理
+
+
+╔══════════════════════════════════════════════════════════════════════════════╗
+║                          内存布局可视化                                         ║
+╚══════════════════════════════════════════════════════════════════════════════╝
+
+partitionList 对象
+├── numPartitions: 3
+├── head → ┌─────────────────────────────────┐
+│         │ partitionNode #1                 │
+│         │ ├── val → *memoryPartition       │ ← 内存分区对象
+│         │ │      ├── metrics (sync.Map)    │
+│         │ │      ├── outOfOrderPoints []Row│
+│         │ │      └── ...                   │
+│         │ ├── next → ┌─────────────────────┤
+│         │ │         │ partitionNode #2     │
+│         │ │         │ ├── val → *memoryPartition
+│         │ │         │ └── next → ┌─────────┤
+│         │ │         │            │ partitionNode #3
+│         │ │         │            │ ├── val → *diskPartition
+│         │ │         │            │ │      ├── meta
+│         │ │         │            │ │      ├── mappedFile []byte
+│         │ │         │            │ │      └── ...
+│         │ │         │            │ └── next → nil
+│         │ │         │            └─────────────────────┤
+│         │ └─────────┴───────────────────────────────────┤
+│         └───────────────────────────────────────────────┘
+│
+└── tail → partitionNode #3 (最旧的分区)
+
+
+图例：
+──→ 指针关系
+├─ 成员字段
+│   └─ 嵌套结构
+
+
+╔══════════════════════════════════════════════════════════════════════════════╗
+║                          关键设计原则                                           ║
+╚══════════════════════════════════════════════════════════════════════════════╝
+
+1. 单一职责原则（Single Responsibility）
+
+partitionNode:
+├─ 职责：管理链表结构
+├─ 关心：next 指针、节点连接
+└─ 不关心：分区如何存储数据
+
+partition:
+├─ 职责：存储和查询数据
+├─ 关心：数据点、指标、编码
+└─ 不关心：自己在链表中的位置
+
+
+2. 组合优于继承（Composition over Inheritance）
+
+不是通过继承实现链表功能
+✅ 而是通过组合：partitionNode 包装 partition
+
+好处：
+├─ 灵活性：partition 可以被其他容器使用
+├─ 可测试性：可以独立测试 partition
+└─ 可扩展性：容易添加新的分区类型
+
+
+3. 接口隔离原则（Interface Segregation）
+
+partition 接口只定义了分区必要的行为
+├─ insertRows()
+├─ selectDataPoints()
+└─ minTimestamp()
+
+不包含链表相关的方法：
+├─ 没有 next 字段
+├─ 没有 setNext() 方法
+└─ 不需要知道链表的存在
+
+
+4. 依赖倒置原则（Dependency Inversion）
+
+partitionList 依赖 partition 接口
+而不是依赖具体的 partitionNode
+
+好处：
+├─ 低耦合
+├─ 易于测试
+└─ 易于扩展
+
+
+╔══════════════════════════════════════════════════════════════════════════════╗
+║                          对比表格                                               ║
+╚══════════════════════════════════════════════════════════════════════════════╝
+
+┌────────────────┬──────────────────────────┬──────────────────────────┐
+│      特性       │     partitionNode        │        partition         │
+├────────────────┼──────────────────────────┼──────────────────────────┤
+│ 类型           │ 结构体（struct）         │ 接口（interface）        │
+│ 作用           │ 链表节点包装器          │ 分区行为定义            │
+│ 主要字段       │ val, next, mu            │ 无（接口无字段）         │
+│ 主要方法       │ value(), setNext()       │ insertRows(), select()   │
+│ 实现数量       │ 1 个（唯一实现）         │ 2+ 个（内存、磁盘...）  │
+│ 是否可变       │ next 可变，val 不可变    │ 接口本身不可变          │
+│ 并发控制       │ 节点级锁（mu）           │ 实现内部处理            │
+│ 关注点         │ 链表结构                │ 数据存储和查询          │
+│ 可否独立存在   │ 否（需要包装 partition） │ 是（可以独立使用）      │
+│ 是否知道链表   │ 是（有 next 指针）       │ 否（不知道链表）        │
+└────────────────┴──────────────────────────┴──────────────────────────┘
+
+
+╔══════════════════════════════════════════════════════════════════════════════╗
+║                          总结                                                   ║
+╚══════════════════════════════════════════════════════════════════════════════╝
+
+核心关系：
+
+partitionNode 包装了 partition
+├─ partitionNode.val = partition
+├─ partitionNode 管理链表结构
+└─ partition 管理数据存储
+
+关键点：
+
+1. 包装器模式（Wrapper）
+   └─ partitionNode 包装 partition 对象
+
+2. 组合关系（Composition）
+   └─ partitionNode 包含 partition
+
+3. 多态（Polymorphism）
+   └─ partitionNode.value() 返回 partition 接口
+       └─ 可能是 memoryPartition 或 diskPartition
+
+4. 职责分离（Separation of Concerns）
+   ├─ partitionNode：链表管理
+   └─ partition：数据存储
+
+一句话总结：
+
+**partitionNode 是链表的节点，负责连接；partition 是实际的数据容器，负责存储。**
+
+类比：
+├─ partitionNode ≈ 快递包裹（盒子）
+├─ partition ≈ 包裹里的物品
+└─ val 字段 ≈ 包裹里的实际内容
+
+
+═══════════════════════════════════════════════════════════════════════════════
+                    partitionNode vs Partition 关系详解结束
+═══════════════════════════════════════════════════════════════════════════════

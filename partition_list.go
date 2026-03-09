@@ -7,6 +7,27 @@ import (
 	"sync/atomic"
 )
 
+/*
+partitionList (分区列表)
+	│
+	├── head ──→ [Memory Partition 1] ←── 最新分区（可写）
+	│              │ next
+	│              ↓
+	│           [Memory Partition 2] ←── 次新分区（可写，用于乱序）
+	│              │ next
+	│              ↓
+	│           [Disk Partition 1]   ←── 只读
+	│              │ next
+	│              ↓
+	│           [Disk Partition 2]   ←── 只读
+	│              │ next
+	│              ↓
+	│           [Disk Partition 3]   ←── 最旧分区
+	│              │ next = nil
+	│
+	└── tail ──→ [Disk Partition 3]   ←── 尾指针
+*/
+
 // partitionList 表示分区的链表。
 // 每个分区按从最新到最旧的顺序排列。
 // 也就是说，头节点始终是最新的，尾节点是最旧的。

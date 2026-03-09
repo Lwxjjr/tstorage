@@ -1,38 +1,32 @@
-# TStorage 项目上下文文档
+# tstorage 项目指南
+
+本文档为 AI 助手提供了 tstorage 项目的上下文信息，以便更好地理解和参与项目开发。
 
 ## 项目概述
 
-`tstorage` 是一个轻量级的本地磁盘时序数据存储引擎，提供简洁的 API 和高度优化的数据写入能力。该项目专门为处理大量时序数据而设计，特别优化了数据摄取性能，支持 goroutine 安全的写入和读取操作。
+tstorage 是一个轻量级的本地磁盘时序数据存储引擎，提供简单的 API 和 goroutine 安全的写入与读取功能。该项目专为处理大量时序数据而优化，特别适合需要实时分析的应用场景。
 
-### 核心特性
+### 主要特性
 
-- **分区存储架构**：采用线性数据模型，按时间分区存储数据点，每个分区作为独立的数据库
-- **内存和磁盘双模式**：默认在内存中运行，可通过 `WithDataPath` 选项持久化到磁盘
-- **高性能写入**：支持并发写入，内置 worker 池限制并发数，防止内存溢出和 CPU 争用
-- **WAL（Write-Ahead Log）**：所有写入操作先记录到 WAL，防止数据丢失
-- **标签支持**：支持带有标签的指标，通过指标名称和标签组合唯一标识
-- **时间戳精度**：支持纳秒、微秒、毫秒、秒四种精度
-- **数据保留策略**：支持自动清理过期分区
+- **高性能写入**：针对大量时序数据摄取进行了优化
+- **Goroutine 安全**：支持并发写入和读取
+- **灵活存储**：支持内存存储和磁盘持久化
+- **时间分区**：采用线性数据模型，按时间分区存储数据
+- **WAL 支持**：预写日志（Write-Ahead Log）防止数据丢失
+- **标签支持**：支持带标签的指标标识
 - **乱序数据处理**：能够处理网络延迟或时钟同步导致的乱序数据点
 
 ### 技术栈
 
 - **语言**：Go 1.20+
-- **核心依赖**：
+- **主要依赖**：
   - `github.com/stretchr/testify` - 测试框架
-  - `github.com/davecgh/go-spew` - 调试输出
+  - `github.com/davecgh/go-spew` - 数据转储
   - `gopkg.in/yaml.v3` - YAML 解析
-- **内部包**：
-  - `internal/cgroup` - CPU 资源检测
-  - `internal/syscall` - 内存映射（mmap）系统调用
-  - `internal/timerpool` - 定时器池
-  - `internal/encoding` - 整数编码
 
-## 项目架构
+### 项目架构
 
-### 分区系统
-
-项目采用分区架构，将时序数据按时间范围划分为多个分区：
+tstorage 采用基于时间分区的线性数据模型，与传统 B 树或 LSM 树存储引擎完全不同：
 
 ```
 Read              Write
@@ -51,298 +45,247 @@ Read              Write
          └───────────────────┘ min: 1600000000
 ```
 
-### 分区类型
+#### 核心组件
 
-1. **Memory Partition（内存分区）**
-   - 可写入，数据存储在堆中
-   - 头部分区始终是内存分区
-   - 保留 2 个可写分区以接受乱序数据
-   - 使用有序切片存储数据点，提供良好的缓存命中率
-   - 所有数据先写入 WAL，再插入内存分区
+1. **Storage**：主存储接口，提供数据插入和查询功能
+   - `InsertRows()`：插入数据行
+   - `Select()`：查询指定时间范围的数据点
+   - `Close()`：优雅关闭，刷新未写入的数据
 
-2. **Disk Partition（磁盘分区）**
-   - 只读，数据持久化到磁盘
-   - 每个分区包含两个文件：
-     - `data`：压缩的数据文件，使用 mmap 内存映射
-     - `meta.json`：元数据文件，包含分区信息和指标索引
-   - 目录命名格式：`p-{minTimestamp}-{maxTimestamp}`
+2. **Partition**：分区接口，每个分区作为完全独立的数据库
+   - **Memory Partition**：可写分区，存储在堆中，使用有序切片提供良好的缓存命中率
+   - **Disk Partition**：只读分区，使用 mmap 内存映射，将数据持久化到磁盘
 
-### 核心组件
+3. **WAL（Write-Ahead Log）**：预写日志，在数据插入内存分区前先写入日志，防止数据丢失
 
-- **Storage**：主存储接口，提供 `InsertRows` 和 `Select` 方法
-- **Partition**：分区接口，定义分区的读写操作
-- **PartitionList**：分区列表，管理所有分区的有序链表
-- **WAL**：预写日志，确保持久性
-- **Encoder/Decoder**：数据编码/解码器
+4. **PartitionList**：管理所有分区的列表，处理分区的创建、切换和过期
+
+#### 数据模型
+
+```go
+type Row struct {
+    Metric    string     // 指标名称
+    Labels    []Label    // 可选标签
+    DataPoint            // 数据点
+}
+
+type DataPoint struct {
+    Value     float64    // 实际值
+    Timestamp int64      // Unix 时间戳
+}
+```
+
+### 磁盘存储结构
+
+当启用磁盘持久化时，数据按以下结构存储：
+
+```
+./data
+├── p-1600000001-1600003600/
+│   ├── data              // 压缩的数据文件（mmap 映射）
+│   └── meta.json         // 分区元数据
+├── p-1600003601-1600007200/
+│   ├── data
+│   └── meta.json
+└── wal/                  // 预写日志目录
+```
 
 ## 构建和运行
 
-### 测试
+### 环境要求
+
+- Go 1.20 或更高版本
+
+### 常用命令
 
 ```bash
-# 运行所有测试（带竞态检测和覆盖率）
+# 运行测试（带竞态检测和覆盖率）
 make test
 
 # 运行基准测试
 make test-bench
-```
 
-### 依赖管理
-
-```bash
-# 整理依赖
-make dep
-```
-
-### 文档
-
-```bash
-# 启动 godoc 服务器
-make godoc
-```
-
-### 性能分析
-
-```bash
 # 分析内存性能
 make pprof-mem
 
 # 分析 CPU 性能
 make pprof-cpu
+
+# 整理依赖
+make dep
+
+# 启动 godoc 文档服务器
+make godoc
 ```
 
-### 直接使用 Go 命令
+### 基本使用示例
 
-```bash
-# 运行测试
-go test -race -v -coverpkg=./... -covermode=atomic -coverprofile=coverage.txt ./...
+```go
+package main
 
-# 运行基准测试
-go test -benchtime=4s -benchmem -bench=. .
+import (
+    "github.com/nakabonne/tstorage"
+)
 
-# 生成文档
-go doc -all github.com/nakabonne/tstorage
+func main() {
+    // 创建存储（默认内存模式）
+    storage, _ := tstorage.NewStorage(
+        tstorage.WithTimestampPrecision(tstorage.Seconds),
+    )
+    defer storage.Close()
+
+    // 插入数据
+    storage.InsertRows([]tstorage.Row{
+        {
+            Metric: "metric1",
+            DataPoint: tstorage.DataPoint{Timestamp: 1600000000, Value: 0.1},
+        },
+    })
+
+    // 查询数据
+    points, _ := storage.Select("metric1", nil, 1600000000, 1600000001)
+}
+```
+
+### 启用磁盘持久化
+
+```go
+storage, _ := tstorage.NewStorage(
+    tstorage.WithDataPath("./data"),  // 指定数据存储路径
+)
+defer storage.Close()
 ```
 
 ## 开发约定
 
 ### 代码风格
 
-- 遵循 Go 标准编码规范
-- 使用接口定义抽象，便于测试和扩展
-- 关键类型定义清晰的接口：
-  - `Storage`：主存储接口
-  - `Reader`：只读接口
-  - `Partition`：分区接口
-
-### 错误处理
-
-- 使用 `errors.New` 定义明确的错误类型
-- 错误信息包含上下文，使用 `%w` 包装底层错误
-- 常见错误：
-  - `ErrNoDataPoints`：未找到数据点
-  - `errInvalidPartition`：无效分区
-
-### 并发控制
-
-- 使用 `sync.Map` 存储指标，提供并发安全的访问
-- 使用 `sync.RWMutex` 保护内存分区的数据点切片
-- 使用 `sync.Once` 确保最小时间戳只设置一次
-- 使用 `atomic` 操作确保数值的原子性
-- 通过 channel 限制并发 worker 数量，防止资源耗尽
+- **注释语言**：项目代码注释已翻译为中文
+- **命名规范**：遵循 Go 语言命名约定
+  - 接口名使用大写字母开头（如 `Storage`、`Partition`）
+  - 私有字段和方法使用小写字母开头
+  - 常量使用大写字母或驼峰命名
 
 ### 测试规范
 
-- 每个源文件都有对应的测试文件
-- 使用 `*_test.go` 命名测试文件
-- 测试覆盖核心功能：插入、查询、分区管理、WAL 恢复等
-- 基准测试使用 4 秒运行时间（`-benchtime=4s`）
+- 使用标准 Go 测试框架
+- 使用 `github.com/stretchr/testify` 进行断言
+- 测试文件以 `_test.go` 结尾
+- 测试命令包含竞态检测：`go test -race`
+- 代码覆盖率目标：通过 `make test` 生成覆盖率报告
 
-### 配置选项
-
-使用选项模式（Option Pattern）配置存储：
-
-- `WithDataPath`：指定数据目录路径
-- `WithPartitionDuration`：设置分区时长（默认 1 小时）
-- `WithRetention`：设置数据保留时长（默认 14 天）
-- `WithTimestampPrecision`：设置时间戳精度（默认纳秒）
-- `WithWriteTimeout`：设置写入超时（默认 30 秒）
-- `WithLogger`：设置日志记录器
-- `WithWALBufferedSize`：设置 WAL 缓冲区大小（默认 4096 字节）
-
-## 目录结构
+### 文件组织
 
 ```
 tstorage/
-├── storage.go              # 主存储实现
+├── storage.go              # 主存储接口和实现
 ├── partition.go            # 分区接口定义
 ├── memory_partition.go     # 内存分区实现
 ├── disk_partition.go       # 磁盘分区实现
-├── partition_list.go       # 分区列表管理
-├── wal.go                  # WAL 接口定义
+├── wal.go                  # 预写日志接口和实现
 ├── disk_wal.go             # 磁盘 WAL 实现
+├── partition_list.go       # 分区列表管理
 ├── encoding.go             # 数据编码/解码
 ├── label.go                # 标签处理
-├── logger.go               # 日志接口
 ├── bstream.go              # 位流处理
-├── fake_encoder.go         # 测试用编码器
-├── fake_partition.go       # 测试用分区
+├── logger.go               # 日志工具
 ├── internal/               # 内部包
-│   ├── cgroup/            # CPU 资源检测
-│   ├── syscall/           # 系统调用封装
-│   ├── timerpool/         # 定时器池
-│   └── encoding/          # 内部编码
-├── testdata/               # 测试数据
-│   └── meta.json          # 示例元数据
-├── go.mod                  # Go 模块定义
-├── Makefile               # 构建和测试命令
-├── README.md              # 项目文档
-└── LICENSE                # 许可证
+│   ├── cgroup/            # cgroup 资源限制
+│   ├── encoding/          # 内部编码
+│   ├── syscall/           # 系统调用封装（mmap）
+│   └── timerpool/         # 定时器池
+└── testdata/              # 测试数据
 ```
 
-## 常见用例
+### 核心概念
 
-### 基本使用
+1. **分区生命周期**：可写 → 只读
+   - 头部分区始终是可写的内存分区
+   - 当分区填满时，转换为磁盘分区并持久化
 
-```go
-import "github.com/nakabonne/tstorage"
+2. **时间戳精度**：支持纳秒、微秒、毫秒、秒四种精度
+   - 默认：纳秒
+   - 可通过 `WithTimestampPrecision` 配置
 
-// 创建内存存储
-storage, _ := tstorage.NewStorage(
-    tstorage.WithTimestampPrecision(tstorage.Seconds),
-)
-defer storage.Close()
+3. **并发控制**：
+   - 数据摄取的并发限制为 GOMAXPROCS（基于 cgroup 可用 CPU 数量）
+   - 所有分区操作都是 goroutine 安全的
 
-// 插入数据
-storage.InsertRows([]tstorage.Row{
-    {
-        Metric: "metric1",
-        DataPoint: tstorage.DataPoint{Timestamp: 1600000000, Value: 0.1},
-    },
-})
+4. **数据压缩**：
+   - 磁盘分区的数据文件经过压缩
+   - 每个指标的数据点单独压缩，便于读取
 
-// 查询数据
-points, _ := storage.Select("metric1", nil, 1600000000, 1600000001)
-```
+### 配置选项
 
-### 持久化存储
+通过 `Option` 函数配置存储：
 
-```go
-// 创建磁盘存储
-storage, _ := tstorage.NewStorage(
-    tstorage.WithDataPath("./data"),
-    tstorage.WithPartitionDuration(2 * time.Hour),
-    tstorage.WithRetention(7 * 24 * time.Hour),
-)
-defer storage.Close()
-```
+- `WithDataPath(string)` - 设置数据存储路径
+- `WithTimestampPrecision(TimestampPrecision)` - 设置时间戳精度
+- `WithPartitionDuration(time.Duration)` - 设置分区持续时间
+- `WithRetention(time.Duration)` - 设置数据保留时间
+- `WithWriteTimeout(time.Duration)` - 设置写入超时
 
-### 带标签的指标
+### 性能优化建议
 
-```go
-labels := []tstorage.Label{
-    {Name: "host", Value: "host-1"},
-}
+1. **写入优化**：
+   - 批量插入数据（使用 `InsertRows`）
+   - 避免频繁的小批量写入
+   - 合理设置分区持续时间
 
-storage.InsertRows([]tstorage.Row{
-    {
-        Metric:    "mem_alloc_bytes",
-        Labels:    labels,
-        DataPoint: tstorage.DataPoint{Timestamp: 1600000000, Value: 0.1},
-    },
-})
-```
+2. **查询优化**：
+   - 尽量缩小查询时间范围
+   - 利用时间戳过滤减少数据扫描
+   - 最近的数据通常在内存分区中，查询更快
 
-## 性能特性
+3. **资源管理**：
+   - 定期清理过期分区
+   - 合理设置保留时间
+   - 监控内存使用情况
 
-- **写入性能**：基准测试显示约 305.9 ns/op，174 B/op，2 allocs/op
-- **查询性能**：在百万级数据点中查询约 292.2 ns/op，56 B/op，1 allocs/op
-- **内存优化**：使用内存映射减少内存占用
-- **缓存友好**：内存分区使用有序切片，提供良好的缓存命中率
+## 常见任务
 
-## 注意事项
+### 添加新的存储选项
 
-1. **时间范围**：`Select` 方法的 start 参数是包含的，end 参数是排除的
-2. **写入限制**：并发写入数受限于 CPU 核心数，可通过 cgroup 检测
-3. **WAL 恢复**：启动时会自动从 WAL 恢复未持久化的数据
-4. **分区切换**：当分区时间范围填满时，自动创建新分区
-5. **过期清理**：定期检查并删除过期的磁盘分区
-6. **乱序数据**：只保留在可写分区范围内的乱序数据，超出范围的数据会被丢弃
+1. 在 `storage.go` 中定义新的 Option 函数
+2. 在 `storage` 结构体中添加对应字段
+3. 在 `NewStorage` 中应用该选项
 
-## 建议阅读路线
+### 实现新的分区类型
 
-### 第一阶段：理解核心概念（1-2 个文件）
+1. 实现 `partition` 接口的所有方法
+2. 在 `partition_list.go` 中注册新的分区类型
+3. 添加相应的测试用例
 
-1. **doc.go** - 项目概述，了解包的用途
-2. **partition.go** - 分区接口定义，理解分区的生命周期和基本操作
+### 修改编码格式
 
-### 第二阶段：内存分区实现（2-3 个文件）
-
-3. **memory_partition.go** - 内存分区的实现
-   - 学习如何管理内存中的数据点
-   - 理解有序切片的使用和乱序数据处理
-   - 关注 `insertRows` 和 `selectDataPoints` 方法
-
-4. **label.go** - 标签处理
-   - 学习如何组合指标名称和标签
-
-### 第三阶段：磁盘分区实现（1-2 个文件）
-
-5. **disk_partition.go** - 磁盘分区的实现
-   - 理解内存映射（mmap）的使用
-   - 学习元数据结构和数据文件组织
-   - 关注 `openDiskPartition` 和 `selectDataPoints` 方法
-
-6. **encoding.go** - 数据编码/解码
-   - 了解数据序列化和压缩方式
-
-### 第四阶段：主存储引擎（1 个文件）
-
-7. **storage.go** - 核心存储实现
-   - 理解分区列表的管理
-   - 学习分区切换和刷盘逻辑
-   - 关注 `InsertRows`、`Select` 和 `flushPartitions` 方法
-
-### 第五阶段：WAL 和持久化（1-2 个文件）
-
-8. **wal.go** - WAL 接口定义
-9. **disk_wal.go** - 磁盘 WAL 实现
-   - 理解预写日志的写入和恢复机制
-
-### 第六阶段：辅助组件（2-3 个文件）
-
-10. **partition_list.go** - 分区列表管理
-    - 学习如何有序管理多个分区
-
-11. **internal/syscall/mmap.go** - 内存映射封装
-    - 理解跨平台的 mmap 实现
-
-### 第七阶段：测试和示例（可选）
-
-12. **storage_test.go** - 主存储测试
-13. **storage_examples_test.go** - 使用示例
-14. **storage_benchmark_test.go** - 性能测试
-
-### 阅读重点
-
-**关键数据结构**：
-- `Row` / `DataPoint` - 数据行和数据点
-- `memoryPartition` / `diskPartition` - 分区实现
-- `meta` / `diskMetric` - 磁盘分区元数据
-
-**关键流程**：
-- 数据写入流程：WAL → 内存分区 → 分区列表
-- 数据查询流程：遍历分区 → 二分查找 → 返回结果
-- 分区切换流程：检测 → 刷盘 → 创建新分区
-- 恢复流程：读取 WAL → 重新插入数据
-
-**设计模式**：
-- 选项模式（Option Pattern）配置存储
-- 接口隔离（Partition、Storage、Reader）
-- 工厂模式创建分区和编码器
+1. 修改 `encoding.go` 中的编码/解码逻辑
+2. 更新 `meta.json` 的结构定义
+3. 确保向后兼容性或提供迁移方案
 
 ## 相关资源
 
-- [Go 包文档](https://pkg.go.dev/mod/github.com/nakabonne/tstorage)
-- [博客文章：从头编写时序数据库引擎](https://nakabonne.dev/posts/write-tsdb-from-scratch)
-- [项目仓库](https://github.com/nakabonne/tstorage)
+- **Go 文档**：https://pkg.go.dev/mod/github.com/nakabonne/tstorage
+- **博客文章**：[Write a time-series database engine from scratch](https://nakabonne.dev/posts/write-tsdb-from-scratch)
+- **灵感来源**：
+  - https://misfra.me/state-of-the-state-part-iii
+  - https://fabxc.org/tsdb
+  - https://questdb.io/blog/2020/11/26/why-timeseries-data
+  - https://akumuli.org/akumuli/2017/04/29/nbplustree
+  - https://github.com/VictoriaMetrics/VictoriaMetrics
+
+## 贡献指南
+
+1. 确保代码通过所有测试：`make test`
+2. 添加新的测试用例覆盖新功能
+3. 更新相关文档
+4. 遵循现有的代码风格和命名规范
+5. 提交前运行 `make dep` 整理依赖
+
+## 注意事项
+
+- 所有公共 API 必须保持向后兼容
+- 修改核心数据结构时需谨慎，考虑数据迁移
+- 涉及磁盘操作的代码需正确处理错误
+- 添加新功能时应提供相应的基准测试
+- 注意内存泄漏和资源释放
+- 确保 WAL 的正确性，避免数据丢失

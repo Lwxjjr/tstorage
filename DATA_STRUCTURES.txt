@@ -1,0 +1,592 @@
+╔══════════════════════════════════════════════════════════════════════════════╗
+║                      tstorage 核心数据结构及关系详解                            ║
+╚══════════════════════════════════════════════════════════════════════════════╝
+
+
+╔══════════════════════════════════════════════════════════════════════════════╗
+║                          数据结构层级图                                         ║
+╚══════════════════════════════════════════════════════════════════════════════╝
+
+storage (主存储)
+    │
+    ├── partitionList (分区列表) ←─────────→ 链表结构
+    │       │
+    │       ├── partitionNode (节点)
+    │       │       │
+    │       │       ├── partition (接口)
+    │       │       │       │
+    │       │       │       ├── memoryPartition (内存分区)
+    │       │       │       │       │
+    │       │       │       │       └── memoryMetric (指标)
+    │       │       │       │               │
+    │       │       │       │               └── DataPoint (数据点)
+    │       │       │       │
+    │       │       │       └── diskPartition (磁盘分区)
+    │       │       │
+    │       │       └── partitionNode (下一个节点)
+    │       │
+    │       └── partitionIterator (迭代器)
+    │
+    └── wal (预写日志)
+            │
+            └── diskWAL / nopWAL
+
+
+╔══════════════════════════════════════════════════════════════════════════════╗
+║                          1. storage（主存储）                                  ║
+╚══════════════════════════════════════════════════════════════════════════════╝
+
+定义位置：storage.go
+
+type storage struct {
+    // 核心组件
+    partitionList  partitionList           ← 分区列表管理器
+    wal           wal                     ← 预写日志
+
+    // 配置参数
+    partitionDuration  time.Duration      ← 分区时长（默认1小时）
+    retention          time.Duration      ← 保留时间（默认14天）
+    timestampPrecision TimestampPrecision ← 时间戳精度（默认纳秒）
+    dataPath           string            ← 磁盘存储路径
+    writeTimeout       time.Duration      ← 写入超时（默认30秒）
+    walBufferedSize    int               ← WAL缓冲区大小
+
+    // 并发控制
+    workersLimitCh chan struct{}        ← 并发限制通道
+    wg             sync.WaitGroup       ← 等待写入完成
+    doneCh         chan struct{}        ← 关闭信号
+
+    // 辅助组件
+    logger Logger                        ← 日志记录器
+}
+
+作用：
+├─ 整个时序存储的入口
+├─ 管理所有分区
+├─ 协调读写操作
+└─ 控制并发和生命周期
+
+与其他结构的关系：
+├─ 持有 partitionList → 管理分区
+├─ 持有 wal → 保证数据持久性
+└─ 配置参数影响所有分区
+
+
+╔══════════════════════════════════════════════════════════════════════════════╗
+║                          2. partitionList（分区列表）                           ║
+╚══════════════════════════════════════════════════════════════════════════════╝
+
+定义位置：partition_list.go
+
+type partitionListImpl struct {
+    numPartitions int64              ← 分区数量（原子计数）
+    head          *partitionNode     ← 头指针（指向最新分区）
+    tail          *partitionNode     ← 尾指针（指向最旧分区）
+    mu            sync.RWMutex       ← 读写锁
+}
+
+作用：
+├─ 管理所有分区的链表
+├─ 提供分区增删改查操作
+├─ 支持并发安全的遍历
+└─ 按时间倒序组织分区（新→旧）
+
+与其他结构的关系：
+├─ 被 storage 持有
+├─ 管理多个 partitionNode
+├─ 提供 partitionIterator 遍历接口
+└─ 操作 partition 对象
+
+
+╔══════════════════════════════════════════════════════════════════════════════╗
+║                          3. partitionNode（链表节点）                           ║
+╚══════════════════════════════════════════════════════════════════════════════╝
+
+定义位置：partition_list.go
+
+type partitionNode struct {
+    val  partition          ← 分区对象（不可变）
+    next *partitionNode     ← 指向下一个节点（较旧的分区）
+    mu   sync.RWMutex       ← 节点级读写锁
+}
+
+作用：
+├─ 链表的基本单元
+├─ 封装 partition 对象
+├─ 维护链表的连接关系
+└─ 支持并发访问
+
+与其他结构的关系：
+├─ 被 partitionList 管理
+├─ 持有 partition 对象
+├─ 指向下一个 partitionNode
+└─ 通过 val 访问实际的分区
+
+
+╔══════════════════════════════════════════════════════════════════════════════╗
+║                          4. partition（分区接口）                              ║
+╚══════════════════════════════════════════════════════════════════════════════╝
+
+定义位置：partition.go
+
+type partition interface {
+    // 写入操作
+    insertRows(rows []Row) (outdatedRows []Row, err error)
+    clean() error
+
+    // 读取操作
+    selectDataPoints(metric string, labels []Label, start, end int64) ([]*DataPoint, error)
+
+    // 元数据
+    minTimestamp() int64
+    maxTimestamp() int64
+    size() int
+    active() bool
+    expired() bool
+}
+
+作用：
+├─ 定义分区的统一接口
+├─ 抽象不同类型的分区
+├─ 支持多态（内存分区、磁盘分区）
+└─ 简化上层调用
+
+实现：
+├─ memoryPartition（内存分区）
+└─ diskPartition（磁盘分区）
+
+
+╔══════════════════════════════════════════════════════════════════════════════╗
+║                          5. memoryPartition（内存分区）                        ║
+╚══════════════════════════════════════════════════════════════════════════════╝
+
+定义位置：memory_partition.go
+
+type memoryPartition struct {
+    metrics       *sync.Map           ← 指标集合（并发安全）
+    wal           wal                 ← 预写日志
+    duration      time.Duration       ← 分区时长
+    precision     TimestampPrecision  ← 时间戳精度
+    outOfOrderCap int                 ← 乱序数据容量
+
+    // 运行时状态
+    minTimestamp      int64           ← 最小时间戳
+    maxTimestamp      int64           ← 最大时间戳
+    lastTimestamp     int64           ← 最后插入的时间戳
+    size              int64           ← 数据点数量
+    outOfOrderPoints  []Row           ← 乱序数据缓冲
+}
+
+作用：
+├─ 存储在内存中的分区
+├─ 支持实时写入
+├─ 处理乱序数据
+└─ 高速读取
+
+与其他结构的关系：
+├─ 实现 partition 接口
+├─ 被 partitionNode 持有
+├─ 持有多个 memoryMetric
+├─ 使用 wal 记录写入
+└─ 可被 flush 到 diskPartition
+
+
+╔══════════════════════════════════════════════════════════════════════════════╗
+║                          6. memoryMetric（内存指标）                           ║
+╚══════════════════════════════════════════════════════════════════════════════╝
+
+定义位置：memory_partition.go
+
+type memoryMetric struct {
+    name           string         ← 指标名称
+    labels         []Label        ← 标签列表
+    points         []DataPoint    ← 数据点切片（有序）
+    minTimestamp   int64          ← 最小时间戳
+    maxTimestamp   int64          ← 最大时间戳
+    lastTimestamp  int64          ← 最后插入的时间戳
+    size           int64          ← 数据点数量
+}
+
+作用：
+├─ 表示一个具体的指标（如 cpu_usage）
+├─ 存储该指标的所有数据点
+├─ 按时间戳有序存储
+└─ 支持范围查询
+
+与其他结构的关系：
+├─ 被 memoryPartition 持有（在 sync.Map 中）
+├─ 持有多个 DataPoint
+├─ 通过 name + labels 唯一标识
+└─ 可被编码到磁盘
+
+
+╔══════════════════════════════════════════════════════════════════════════════╗
+║                          7. diskPartition（磁盘分区）                          ║
+╚══════════════════════════════════════════════════════════════════════════════╝
+
+定义位置：disk_partition.go
+
+type diskPartition struct {
+    dirPath    string     ← 磁盘分区目录路径
+    meta       meta       ← 分区元数据
+    f          *os.File   ← data 文件句柄
+    mappedFile []byte     ← mmap 映射的文件内容
+    retention  time.Duration ← 保留时间
+}
+
+type meta struct {
+    MinTimestamp  int64                  ← 最小时间戳
+    MaxTimestamp  int64                  ← 最大时间戳
+    NumDataPoints int64                  ← 数据点总数
+    Metrics       map[string]diskMetric  ← 指标索引
+    CreatedAt     time.Time              ← 创建时间
+}
+
+type diskMetric struct {
+    Name          string  ← 指标名称
+    Offset        int64   ← 在 data 文件中的偏移量
+    MinTimestamp  int64   ← 最小时间戳
+    MaxTimestamp  int64   ← 最大时间戳
+    NumDataPoints int64   ← 数据点数量
+}
+
+作用：
+├─ 持久化到磁盘的分区
+├─ 使用 mmap 高效读取
+├─ 数据压缩存储
+└─ 只读访问
+
+与其他结构的关系：
+├─ 实现 partition 接口
+├─ 被 partitionNode 持有
+├─ 对应磁盘目录：p-{min}-{max}/
+├─ 持有 data 文件和 meta.json
+└─ 由 memoryPartition flush 而来
+
+
+╔══════════════════════════════════════════════════════════════════════════════╗
+║                          8. Row 和 DataPoint（数据单位）                        ║
+╚══════════════════════════════════════════════════════════════════════════════╝
+
+定义位置：storage.go
+
+type Row struct {
+    Metric    string     ← 指标名称（必填）
+    Labels    []Label    ← 标签列表（可选）
+    DataPoint            ← 数据点
+}
+
+type DataPoint struct {
+    Value     float64    ← 实际值（必填）
+    Timestamp int64      ← Unix 时间戳
+}
+
+type Label struct {
+    Name  string  ← 标签名
+    Value string  ← 标签值
+}
+
+作用：
+├─ 时序数据的最小单位
+├─ 用户输入的数据格式
+├─ 包含指标、标签、值、时间戳
+└─ 被插入到 memoryMetric 中
+
+与其他结构的关系：
+├─ 被 InsertRows() 接收
+├─ 被插入到 memoryMetric.points
+├─ 被编码到 diskPartition
+└─ 被 selectDataPoints() 返回
+
+
+╔══════════════════════════════════════════════════════════════════════════════╗
+║                          9. wal（预写日志）                                    ║
+╚══════════════════════════════════════════════════════════════════════════════╝
+
+定义位置：wal.go
+
+type wal interface {
+    append(op walOperation, rows []Row) error
+    flush() error
+    punctuate() error
+    removeOldest() error
+    removeAll() error
+    refresh() error
+}
+
+type walOperation byte
+
+const (
+    operationInsert walOperation = iota  // 插入操作
+)
+
+作用：
+├─ 记录所有写入操作
+├─ 防止数据丢失
+├─ 支持崩溃恢复
+└─ 保证数据持久性
+
+实现：
+├─ nopWAL（内存模式，空实现）
+└─ diskWAL（磁盘模式，实际写入）
+
+与其他结构的关系：
+├─ 被 storage 持有
+├─ 被 memoryPartition 使用
+├─ 记录所有 InsertRows 操作
+└─ 恢复时重新插入数据
+
+
+╔══════════════════════════════════════════════════════════════════════════════╗
+║                          核心关系图                                           ║
+╚══════════════════════════════════════════════════════════════════════════════╝
+
+storage (1) ──────→ (1) partitionList
+                       │
+                       ├──→ (N) partitionNode ──→ (1) partition (接口)
+                                                       │
+                       ├──→ (1) partitionIterator      ├──→ memoryPartition
+                       │                                    │
+                       └──→ (N) partition ←────────────────┤
+                                                            │
+                                                            └──→ (N) memoryMetric ──→ (N) DataPoint
+
+storage (1) ──────→ (1) wal
+
+partitionNode (N) ──→ (1) diskPartition
+                             │
+                             ├──→ (1) meta ──→ (N) diskMetric
+                             └──→ (1) data 文件（mmap）
+
+
+图例：
+(1)  → 1 对 1 关系
+(N)  → 1 对 N 关系
+───→  包含/指向关系
+
+
+╔══════════════════════════════════════════════════════════════════════════════╗
+║                          数据流向关系                                           ║
+╚══════════════════════════════════════════════════════════════════════════════╝
+
+【写入流程】
+
+Row/DataPoint
+    │
+    ↓
+storage.InsertRows()
+    │
+    ├─→ wal.append()  [记录到 WAL]
+    │
+    ↓
+partitionList.insert()  [创建新分区]
+    │
+    ↓
+partitionNode (新节点)
+    │
+    ↓
+memoryPartition
+    │
+    ↓
+memoryMetric.getOrCreate()
+    │
+    ↓
+memoryMetric.points.append(DataPoint)
+
+
+【查询流程】
+
+storage.Select()
+    │
+    ↓
+partitionList.newIterator()
+    │
+    ↓
+partitionNode (遍历)
+    │
+    ↓
+partition (接口)
+    │
+    ├─→ memoryPartition.selectDataPoints()
+    │   │
+    │   └─→ memoryMetric.points[筛选] → DataPoint[]
+    │
+    └─→ diskPartition.selectDataPoints()
+        │
+        └─→ meta.Metrics[指标名] → Offset
+            │
+            ↓
+            mmap.seek(Offset) → decode → DataPoint[]
+
+
+【持久化流程】
+
+memoryPartition
+    │
+    ├─→ metrics (遍历)
+    │   │
+    │   └─→ memoryMetric.points
+    │       │
+    │       └─→ encode() → 压缩
+    │           │
+    │           ↓
+    │       data 文件
+    │
+    └─→ meta.json (生成)
+
+    ↓
+diskPartition (创建)
+    │
+    └─→ mmap(data 文件)
+
+
+╔══════════════════════════════════════════════════════════════════════════════╗
+║                          内存布局示例                                           ║
+╚══════════════════════════════════════════════════════════════════════════════╝
+
+storage 对象（在堆中）
+├── partitionList (partitionListImpl)
+│   ├── head → partitionNode A
+│   │           ├── val → memoryPartition
+│   │           │           ├── metrics (sync.Map)
+│   │           │           │   ├── "cpu_usage" → memoryMetric
+│   │           │           │   │   └── points []DataPoint
+│   │           │           │   └── "mem_usage" → memoryMetric
+│   │           │           │       └── points []DataPoint
+│   │           │           └── outOfOrderPoints []Row
+│   │           └── next → partitionNode B
+│   │                       ├── val → memoryPartition
+│   │                       └── next → partitionNode C
+│   │                                   ├── val → diskPartition
+│   │                                   │   ├── meta (meta.json 在内存中)
+│   │                                   │   │   └── Metrics map[string]diskMetric
+│   │                                   │   └── mappedFile []byte (mmap)
+│   │                                   └── next → nil
+│   └── tail → partitionNode C
+│
+├── wal → diskWAL
+│   └── buffered []byte
+│
+└── workersLimitCh chan struct{} (GOMAXPROCS 个槽位)
+
+
+╔══════════════════════════════════════════════════════════════════════════════╗
+║                          磁盘布局示例                                           ║
+╚══════════════════════════════════════════════════════════════════════════════╝
+
+./data/
+├── p-1600000001-1600003600/          ← diskPartition 对应的目录
+│   ├── data                          ← 压缩的数据文件（mmap 映射）
+│   │   └── [编码后的数据点]
+│   └── meta.json                     ← 分区元数据
+│       {
+│         "MinTimestamp": 1600000001,
+│         "MaxTimestamp": 1600003600,
+│         "NumDataPoints": 10000,
+│         "Metrics": {
+│           "cpu_usage": {
+│             "Name": "cpu_usage",
+│             "Offset": 0,
+│             "MinTimestamp": 1600000001,
+│             "MaxTimestamp": 1600001800,
+│             "NumDataPoints": 5000
+│           },
+│           "mem_usage": {
+│             "Name": "mem_usage",
+│             "Offset": 25000,
+│             "MinTimestamp": 1600001801,
+│             "MaxTimestamp": 1600003600,
+│             "NumDataPoints": 5000
+│           }
+│         }
+│       }
+│
+├── p-1600003601-1600007200/          ← 另一个磁盘分区
+│   ├── data
+│   └── meta.json
+│
+└── wal/                              ← WAL 目录
+    ├── 000001.wal                    ← WAL 段文件
+    └── 000002.wal
+
+
+╔══════════════════════════════════════════════════════════════════════════════╗
+║                          关键设计模式                                           ║
+╚══════════════════════════════════════════════════════════════════════════════╝
+
+1. 接口模式（Interface）
+   └─ partition 接口支持多态
+       ├─ memoryPartition 实现
+       └─ diskPartition 实现
+
+2. 链表模式（Linked List）
+   └─ partitionList 使用单向链表
+       ├─ 头部插入 O(1)
+       └─ 从新到旧遍历
+
+3. 迭代器模式（Iterator）
+   └─ partitionIterator 提供遍历接口
+       ├─ 封装内部结构
+       └─ 支持安全遍历
+
+4. 工厂模式（Factory）
+   └─ newPartition() 创建分区
+       ├─ 根据类型创建
+       └─ 配置参数
+
+5. 享元模式（Flyweight）
+   └─ memoryMetric 共享
+       ├─ 通过 sync.Map 存储
+       └─ 相同指标名称+标签共享
+
+6. 策略模式（Strategy）
+   └─ wal 接口支持不同策略
+       ├─ nopWAL（内存模式）
+       └─ diskWAL（磁盘模式）
+
+
+╔══════════════════════════════════════════════════════════════════════════════╗
+║                          总结                                                   ║
+╚══════════════════════════════════════════════════════════════════════════════╝
+
+核心数据结构（按重要性排序）：
+
+1. storage
+   └─ 整个存储的入口和协调器
+
+2. partitionList
+   └─ 管理所有分区的链表
+
+3. partition (接口)
+   └─ 分区的抽象定义
+
+4. memoryPartition
+   └─ 内存中的可写分区
+
+5. diskPartition
+   └─ 磁盘上的只读分区
+
+6. memoryMetric
+   └─ 内存中的指标实例
+
+7. partitionNode
+   └─ 链表的基本单元
+
+8. wal
+   └─ 预写日志
+
+9. Row/DataPoint
+   └─ 数据的基本单位
+
+关键关系：
+├─ storage 持有 partitionList 和 wal
+├─ partitionList 管理多个 partitionNode
+├─ partitionNode 持有 partition 对象
+├─ memoryPartition 持有多个 memoryMetric
+├─ memoryMetric 持有多个 DataPoint
+└─ diskPartition 对应磁盘上的文件
+
+
+═══════════════════════════════════════════════════════════════════════════════
+                        数据结构详解结束
+═══════════════════════════════════════════════════════════════════════════════
