@@ -62,7 +62,7 @@ func ExampleStorage_InsertRows() {
 }
 
 // simulates writing and reading in concurrent.
-func ExampleStorage_InsertRows_Select_concurrent() {
+func ExampleStorage_InsertRows_selectConcurrent() {
 	storage, err := tstorage.NewStorage(
 		tstorage.WithPartitionDuration(5*time.Hour),
 		tstorage.WithTimestampPrecision(tstorage.Seconds),

@@ -392,10 +392,11 @@ func (s *storage) ensureActiveHead() error {
 		return nil
 	}
 
-	// 所有分区似乎都是不活动的，因此向列表中添加一个新分区。
+	// 1. 所有分区似乎都是不活动的，因此向列表中添加一个新分区。
 	if err := s.newPartition(nil, true); err != nil {
 		return err
 	}
+	// 2. 异步刷新旧的分区到磁盘
 	go func() {
 		if err := s.flushPartitions(); err != nil {
 			s.logger.Printf("failed to flush in-memory partitions: %v", err)
@@ -585,6 +586,7 @@ func (s *storage) flushPartitions() error {
 			continue
 		}
 
+		// 在内存模式下，直接从分区列表中删除分区，数据不持久化
 		if s.inMemoryMode() {
 			if err := s.partitionList.remove(part); err != nil {
 				return fmt.Errorf("failed to remove partition: %w", err)
@@ -648,48 +650,67 @@ func (s *storage) flushPartitions() error {
 //   - meta.json 文件必须最后写入，作为分区有效的证明
 //   - 磁盘分区是只读的，使用 mmap 映射访问
 func (s *storage) flush(dirPath string, m *memoryPartition) error {
+	// 验证目标目录路径是否有效
 	if dirPath == "" {
 		return fmt.Errorf("dir path is required")
 	}
 
+	// 创建目标目录，用于存储磁盘分区的数据文件和元数据
 	if err := os.MkdirAll(dirPath, fs.ModePerm); err != nil {
 		return fmt.Errorf("failed to make directory %q: %w", dirPath, err)
 	}
 
+	// 创建 data 文件，用于存储压缩后的数据点
+	// 数据点会按指标分别编码和压缩后写入此文件
 	f, err := os.Create(filepath.Join(dirPath, dataFileName))
 	if err != nil {
 		return fmt.Errorf("failed to create file %q: %w", dirPath, err)
 	}
 	defer f.Close()
+	// 创建序列编码器，用于将数据点编码写入文件
 	encoder := newSeriesEncoder(f)
 
+	// 存储每个指标的元数据，包括名称、文件偏移量、时间范围等
 	metrics := map[string]diskMetric{}
+
+	// 遍历内存分区中的所有指标，将每个指标的数据点写入磁盘
 	m.metrics.Range(func(key, value interface{}) bool {
+		// 类型断言，确保值是 memoryMetric 类型
 		mt, ok := value.(*memoryMetric)
 		if !ok {
 			s.logger.Printf("unknown value found\n")
 			return false
 		}
+
+		// 获取当前文件偏移量，记录该指标数据在文件中的起始位置
+		// 这个偏移量将被记录在元数据中，用于后续快速定位读取
 		offset, err := f.Seek(0, io.SeekCurrent)
 		if err != nil {
 			s.logger.Printf("failed to set file offset of metric %q: %v\n", mt.name, err)
 			return false
 		}
 
+		// 将该指标的所有数据点（包括正常点和乱序点）编码并写入文件
+		// 数据点会被压缩以节省存储空间
 		if err := mt.encodeAllPoints(encoder); err != nil {
 			s.logger.Printf("failed to encode a data point that metric is %q: %v\n", mt.name, err)
 			return false
 		}
 
+		// 刷新编码器缓冲区，确保数据写入磁盘
+		// 避免数据缓存在内存中导致丢失
 		if err := encoder.flush(); err != nil {
 			s.logger.Printf("failed to flush data points that metric is %q: %v\n", mt.name, err)
 			return false
 		}
 
+		// 计算该指标的总数据点数量（正常点 + 乱序点）
 		totalNumPoints := mt.size + int64(len(mt.outOfOrderPoints))
+
+		// 记录该指标的元数据，用于后续快速查询和数据定位
 		metrics[mt.name] = diskMetric{
 			Name:          mt.name,
-			Offset:        offset,
+			Offset:        offset,      // 在 data 文件中的起始位置
 			MinTimestamp:  mt.minTimestamp,
 			MaxTimestamp:  mt.maxTimestamp,
 			NumDataPoints: totalNumPoints,
@@ -697,6 +718,7 @@ func (s *storage) flush(dirPath string, m *memoryPartition) error {
 		return true
 	})
 
+	// 创建分区元数据，包含分区级别的信息和所有指标的索引
 	b, err := json.Marshal(&meta{
 		MinTimestamp:  m.minTimestamp(),
 		MaxTimestamp:  m.maxTimestamp(),
@@ -705,7 +727,8 @@ func (s *storage) flush(dirPath string, m *memoryPartition) error {
 		CreatedAt:     time.Now(),
 	})
 
-	// 应该最后写入 meta 文件，因为有效的 meta 文件存在证明磁盘分区是有效的。
+	// 应该最后写入 meta 文件，因为有效的 meta 文件存在证明磁盘分区是有效的
+	// 如果在写入 meta 文件前程序崩溃，分区将被视为无效，不会被加载
 	metaPath := filepath.Join(dirPath, metaFileName)
 	if err := os.WriteFile(metaPath, b, fs.ModePerm); err != nil {
 		return fmt.Errorf("failed to write metadata to %s: %w", metaPath, err)
@@ -732,22 +755,37 @@ func (s *storage) flush(dirPath string, m *memoryPartition) error {
 //   - 过期的内存分区会被直接丢弃
 //   - 保留时间从分区创建时开始计算
 func (s *storage) removeExpiredPartitions() error {
+	// 收集所有过期的分区
+	// 先收集再删除，避免在遍历过程中修改分区列表导致的问题
 	expiredList := make([]partition, 0)
+
+	// 创建分区列表迭代器，从最新到最旧遍历所有分区
 	iterator := s.partitionList.newIterator()
+
+	// 遍历所有分区，检查是否过期
 	for iterator.next() {
 		part := iterator.value()
 		if part == nil {
 			return fmt.Errorf("unexpected nil partition found")
 		}
+
+		// 检查分区是否已过期
+		// 过期判断基于配置的 retention 时间
+		// 内存分区永远不会过期（expired() 返回 false）
+		// 磁盘分区会根据创建时间检查是否超过 retention
 		if part.expired() {
+			// 将过期的分区添加到待删除列表
 			expiredList = append(expiredList, part)
 		}
 	}
 
+	// 遍历所有过期的分区，从分区列表中移除
 	for i := range expiredList {
 		if err := s.partitionList.remove(expiredList[i]); err != nil {
 			return fmt.Errorf("failed to remove expired partition")
 		}
+		// 注意：磁盘分区在移除时，其对应的文件也会被删除
+		// 这是通过 diskPartition 的 clean() 方法实现的
 	}
 	return nil
 }
@@ -776,24 +814,42 @@ func (s *storage) removeExpiredPartitions() error {
 //   - 恢复完成后，所有 WAL 文件都会被删除
 //   - 如果 WAL 文件损坏，恢复可能会失败
 func (s *storage) recoverWAL(walDir string) error {
+	// 创建 WAL 读取器，用于读取 WAL 文件中的操作记录
 	reader, err := newDiskWALReader(walDir)
+
+	// 如果 WAL 目录不存在，说明没有需要恢复的数据
+	// 这可能是首次启动或之前正常关闭（WAL 已清理）
 	if errors.Is(err, os.ErrNotExist) {
 		return nil
 	}
+
+	// 如果出现其他错误（如权限问题、文件损坏等），直接返回错误
 	if err != nil {
 		return err
 	}
 
+	// 读取所有 WAL 段文件中的记录
+	// WAL 可能包含多个段文件，按时间顺序排列
+	// readAll() 会解析所有记录并还原为数据行
 	if err := reader.readAll(); err != nil {
 		return fmt.Errorf("failed to read WAL: %w", err)
 	}
 
+	// 如果没有需要恢复的数据，直接返回
 	if len(reader.rowsToInsert) == 0 {
 		return nil
 	}
+
+	// 将恢复的数据行插入到存储中
+	// 这些数据会根据时间戳分配到相应的分区（内存或磁盘）
+	// 注意：此时磁盘分区已经加载完成，所以数据会被正确分配
 	if err := s.InsertRows(reader.rowsToInsert); err != nil {
 		return fmt.Errorf("failed to insert rows recovered from WAL: %w", err)
 	}
+
+	// 刷新 WAL 并清理所有 WAL 段文件
+	// 因为数据已经恢复并持久化，不再需要 WAL 文件
+	// refresh() 会删除所有 WAL 段文件，为新的写入操作做准备
 	return s.wal.refresh()
 }
 
